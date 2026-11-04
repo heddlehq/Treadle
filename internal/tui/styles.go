@@ -55,7 +55,7 @@ func baseView(content string) tea.View {
 	v := tea.NewView(content)
 	v.BackgroundColor = backgroundColor
 	v.ForegroundColor = textColor
-	v.WindowTitle = "Fusor"
+	v.WindowTitle = "Treadle"
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	v.ReportFocus = true

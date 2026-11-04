@@ -39,7 +39,7 @@ func (m model) View() tea.View {
 	if m.width < minWidth || m.height < minHeight {
 		body := lipgloss.NewStyle().
 			Foreground(mutedTextColor).
-			Render("Increase terminal size to use FusionFlow.")
+			Render("Increase terminal size to use Heddle.")
 		frame := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 		return baseView(frame)
 	}
@@ -68,8 +68,8 @@ func (m model) handleConnectionResult(msg connectionResultMsg) (tea.Model, tea.C
 	m.activeHost = msg.host
 	m.activeAPIKey = msg.apiKey
 
-	_ = keyring.Set("fusor", "host", msg.host)
-	_ = keyring.Set("fusor", "api_key", msg.apiKey)
+	_ = keyring.Set("treadle", "host", msg.host)
+	_ = keyring.Set("treadle", "api_key", msg.apiKey)
 
 	m.connectError = ""
 	m.connectStatus = "Connected."
@@ -140,11 +140,11 @@ func (m model) renderConnectScreen() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(textColor).
-		Render("FusionFlow")
+		Render("Heddle")
 
 	subtitle := lipgloss.NewStyle().
 		Foreground(mutedTextColor).
-		Render("Connect to your FusionFlow server")
+		Render("Connect to your Heddle server")
 
 	inputLine := renderInputBlock(m.hostInput.View(), formWidth, m.hostInput.Focused())
 	apiKeyLine := renderInputBlock(m.apiKeyInput.View(), formWidth, m.apiKeyInput.Focused())

@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"fusor/internal/tui"
+	"treadle/internal/tui"
 )
 
 func main() {
