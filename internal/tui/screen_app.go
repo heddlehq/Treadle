@@ -87,8 +87,8 @@ func (m model) handleWorkflowsLoaded(msg workflowsLoadedMsg) (tea.Model, tea.Cmd
 
 func (m model) renderAppScreen() string {
 	bodyHeight := max(m.height-composerHeight-footerHeight-sectionGapSize, 1)
-	sidebar := renderSectionPanel("FusionFlow", m.renderSidebarLines(), m.sidebarRect.w, bodyHeight)
-	main := renderSectionPanel("FusionFlow", m.renderMainLines(), m.mainRect.w, bodyHeight)
+	sidebar := renderSectionPanel("Heddle", m.renderSidebarLines(), m.sidebarRect.w, bodyHeight)
+	main := renderSectionPanel("Heddle", m.renderMainLines(), m.mainRect.w, bodyHeight)
 	command := m.renderCommandBar()
 	footer := renderFooter("↑↓ workflows  ⏎ open  n new  / command  esc unfocus  q quit", m.footerRect.w)
 

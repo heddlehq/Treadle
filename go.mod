@@ -1,4 +1,4 @@
-module fusor
+module treadle
 
 go 1.26.2
 

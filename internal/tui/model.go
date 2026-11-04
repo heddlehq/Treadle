@@ -213,21 +213,21 @@ func initialModel() model {
 	hostInput.SetStyles(textInputStyles())
 	hostInput.Focus()
 
-	if savedHost, err := keyring.Get("fusor", "host"); err == nil && savedHost != "" {
+	if savedHost, err := keyring.Get("treadle", "host"); err == nil && savedHost != "" {
 		hostInput.SetValue(savedHost)
 	}
 
 	apiKeyInput := textinput.New()
 	apiKeyInput.SetWidth(0)
 	apiKeyInput.CharLimit = 128
-	apiKeyInput.Placeholder = "ff_live_..."
+	apiKeyInput.Placeholder = "hd_live_..."
 	apiKeyInput.Prompt = "Key:  "
 	apiKeyInput.SetVirtualCursor(true)
 	apiKeyInput.SetStyles(textInputStyles())
 	apiKeyInput.EchoMode = textinput.EchoPassword
 	apiKeyInput.EchoCharacter = '•'
 
-	if savedKey, err := keyring.Get("fusor", "api_key"); err == nil && savedKey != "" {
+	if savedKey, err := keyring.Get("treadle", "api_key"); err == nil && savedKey != "" {
 		apiKeyInput.SetValue(savedKey)
 	}
 

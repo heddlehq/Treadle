@@ -355,7 +355,7 @@ func (m model) renderWorkflowEditor() string {
 }
 
 func (m model) renderWorkflowTopBar() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render("FusionFlow")
+	title := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render("Heddle")
 	name := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(m.editorWorkflowName)
 	saveLabel := "Save"
 	saveStyle := lipgloss.NewStyle().Foreground(successColor).Bold(true)
