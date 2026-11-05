@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="#"><img src="https://img.shields.io/badge/status-in%20development-orange?style=flat-square" alt="Status" /></a>&nbsp;
-  <a href="#"><img src="https://img.shields.io/badge/go-1.21+-00ADD8?style=flat-square&logo=go" alt="Go Version" /></a>&nbsp;
+  <a href="#"><img src="https://img.shields.io/badge/go-1.26+-00ADD8?style=flat-square&logo=go" alt="Go Version" /></a>&nbsp;
   <a href="#"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
 </p>
 
@@ -21,29 +21,46 @@
 With an integrated AI chat, you can describe the workflow you want, and the agent will help you build it block by block without leaving your command line.
 
 > [!WARNING]
-> **Treadle is currently in active development.** The project is experimental and the only way to run it is by building from source. Expect breaking changes and incomplete features.
+> **Treadle is currently in active development.** Expect breaking changes and incomplete features.
 
 ## 🚀 Getting Started
 
-Since Treadle is in development, there are no pre-built binaries available yet. You must compile it from source.
+### Install
 
-### Prerequisites
-
-- Go 1.21 or later installed on your system.
-
-### Build & Run
-
-Clone the repository and run the main entry point:
+On Linux or macOS:
 
 ```bash
-# Clone the repository
-git clone https://github.com/heddlehq/Treadle.git
-cd treadle
+curl -fsSL https://github.com/heddlehq/Treadle/releases/latest/download/install.sh | sh
+```
 
-# Build and run the app
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/heddlehq/Treadle/releases/latest/download/install.ps1 | iex
+```
+
+Run the same command to update. Set `TREADLE_VERSION=0.1.0` to install a specific version, or `TREADLE_HOME` to install somewhere else.
+
+Then run `treadle`, and connect it to your [Heddle](https://github.com/heddlehq/Heddle) server. `treadle --version` prints the version you have.
+
+### Build from source
+
+You need the Go version in [`go.mod`](go.mod).
+
+```bash
+git clone https://github.com/heddlehq/Treadle.git
+cd Treadle
 go run ./cmd/treadle
 ```
 
+## 📦 Releasing
+
+The [`VERSION`](VERSION) file is the only place the version is written down, and it's built into the binary.
+
+1. Change `VERSION` on `main`.
+2. Tag that commit: `git tag v$(cat VERSION) && git push origin v$(cat VERSION)`.
+
+The tag builds and tests every platform, including a real run of the install scripts, and then publishes the GitHub release. The release fails if the tag doesn't match `VERSION` or isn't on `main`.
 
 ## 🤝 Community & Contributing
 

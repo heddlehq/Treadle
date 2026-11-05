@@ -14,6 +14,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/zalando/go-keyring"
+
+	"treadle"
 )
 
 func TestMain(m *testing.M) {
@@ -1313,5 +1315,14 @@ func TestClickingTheBrowserButtonStartsSignIn(t *testing.T) {
 
 	if !m.oauthWaiting || cmd == nil {
 		t.Fatalf("waiting = %v", m.oauthWaiting)
+	}
+}
+
+func TestLoginShowsTheVersion(t *testing.T) {
+	lines := screenLines(sizedModel(110, 36))
+
+	footer := lines[len(lines)-1]
+	if !strings.Contains(footer, "v"+treadle.Version) || lipgloss.Width(footer) != 110 {
+		t.Fatalf("footer = %q", footer)
 	}
 }

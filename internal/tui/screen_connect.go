@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"treadle"
 )
 
 const (
@@ -296,6 +298,8 @@ func (m model) renderConnectScreen() string {
 
 	center(l.statusY, m.renderConnectStatus(l.host.w))
 
-	footer := renderHints("tab next  ⏎ connect  esc quit", m.footerRect.w)
+	version := "v" + treadle.Version + "  "
+	footer := renderHints("tab next  ⏎ connect  esc quit", m.footerRect.w-lipgloss.Width(version)) +
+		lipgloss.NewStyle().Foreground(mutedTextColor).Render(version)
 	return strings.Join(rows, "\n") + "\n" + footer
 }
