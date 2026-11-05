@@ -149,7 +149,7 @@ func settle(t *testing.T, m model, cmd tea.Cmd) model {
 
 	// Only what the chat started: the cursor blink never ends.
 	switch msg.(type) {
-	case agentReplyMsg, agentRunStartedMsg, agentFlowLoadedMsg:
+	case agentReplyMsg, agentRunStartedMsg, agentFlowLoadedMsg, workflowLoadedMsg:
 		next, nextCmd := m.Update(msg)
 		return settle(t, next.(model), nextCmd)
 	}
@@ -507,27 +507,105 @@ func editorWithoutChat(width, height int) model {
 	return m
 }
 
-func TestChatStaysOutOfTheWayUntilOpened(t *testing.T) {
-	if m := editorWithoutChat(140, 40); onScreen(m, "Agent") {
-		t.Fatal("the panel takes room nobody asked for")
+func TestChatIsThereWhenTheEditorOpens(t *testing.T) {
+	m := editorWithoutChat(140, 40)
+
+	if !onScreen(m, "Ask the agent to build") {
+		t.Fatal("nobody would find the chat")
+	}
+	if m.aiPromptInput.Focused() {
+		t.Fatal("the editor's shortcuts should keep working")
 	}
 }
 
-func TestSlashOpensTheChatOnScreen(t *testing.T) {
-	m := editorWithoutChat(140, 40)
-	canvasBefore := m.canvasRect.w
+func TestSlashFocusesTheChat(t *testing.T) {
+	next, _ := editorWithoutChat(140, 40).Update(keyPress("/"))
+
+	if !next.(model).aiPromptInput.Focused() {
+		t.Fatal("should be focused")
+	}
+}
+
+func TestSlashBringsTheChatBack(t *testing.T) {
+	m := editorWithoutChat(140, 40).closeAIChat()
+	wide := m.canvasRect.w
 
 	next, _ := m.Update(keyPress("/"))
 	m = next.(model)
 
-	if !m.aiPromptInput.Focused() {
-		t.Fatal("should be focused")
-	}
-	if !onScreen(m, "Agent") {
+	if !onScreen(m, "Ask the agent to build") {
 		t.Fatal("the panel isn't on screen")
 	}
-	if m.canvasRect.w >= canvasBefore {
+	if m.canvasRect.w >= wide {
 		t.Fatal("the canvas should make room")
+	}
+}
+
+func TestANarrowTerminalKeepsTheCanvas(t *testing.T) {
+	m := editorWithoutChat(72, 24)
+
+	if onScreen(m, "Ask the agent to build") {
+		t.Fatal("no room for the panel")
+	}
+	if m.canvasRect.w < 40 {
+		t.Fatalf("canvas = %d", m.canvasRect.w)
+	}
+}
+
+func listModel(t *testing.T, fake *fakeHeddle) model {
+	t.Helper()
+
+	m := appModel(140, 40, workflow{id: 7, name: "Flow"})
+	m.activeHost = fake.url
+	m.activeAPIKey = "heddle-token"
+	return m
+}
+
+func askFromList(t *testing.T, m model, prompt string) model {
+	t.Helper()
+
+	next, _ := m.Update(keyPress("/"))
+	m = next.(model)
+	m.composerInput.SetValue(prompt)
+
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	return settle(t, next.(model), cmd)
+}
+
+func TestTheListSendsAMessageToTheSelectedWorkflow(t *testing.T) {
+	fake := heddle(t, reply("On it."))
+
+	m := askFromList(t, listModel(t, fake), "add a logger")
+
+	if m.screen != screenWorkflowEditor {
+		t.Fatalf("screen = %v", m.screen)
+	}
+	if fake.chatCount() != 1 || fake.chats[0]["flow_id"] != "7" {
+		t.Fatalf("chats = %+v", fake.chats)
+	}
+	if !onScreen(m, "On it.") {
+		t.Fatal("the reply isn't on screen")
+	}
+}
+
+func TestTheListStillRunsItsCommands(t *testing.T) {
+	fake := heddle(t, reply("no"))
+
+	m := askFromList(t, listModel(t, fake), "help")
+
+	if fake.chatCount() != 0 || m.screen != screenApp {
+		t.Fatal("help went to the agent")
+	}
+}
+
+func TestAFailedOpenDropsTheMessage(t *testing.T) {
+	m := listModel(t, heddle(t, ""))
+	m.agentQueuedPrompt = "hi"
+
+	next, _ := m.Update(workflowLoadedMsg{err: errors.New("boom")})
+
+	if next.(model).agentQueuedPrompt != "" {
+		t.Fatal("it would be sent to the next workflow opened")
 	}
 }
 

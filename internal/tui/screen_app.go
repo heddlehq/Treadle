@@ -17,7 +17,8 @@ func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.composerInput.Focused() {
 			if msg.Code == tea.KeyEnter {
-				return m, m.submitCommand()
+				cmd := m.submitCommand()
+				return m, cmd
 			}
 			switch msg.String() {
 			case "esc":
@@ -169,9 +170,9 @@ func (m model) renderAppScreen() string {
 	}
 	rows = append(rows, m.renderCommandBar()...)
 
-	hints := "↑↓ select  ⏎ open  n new  r reload  / command  L log out  q quit"
+	hints := "↑↓ select  ⏎ open  n new  r reload  / agent  L log out  q quit"
 	if m.composerInput.Focused() {
-		hints = "⏎ run  esc cancel"
+		hints = "⏎ send  esc cancel"
 	}
 	rows = append(rows, renderHints(hints, m.footerRect.w))
 
@@ -440,10 +441,12 @@ func (m *model) submitCommand() tea.Cmd {
 		*m = next
 		return cmd
 	default:
-		m.commandOutput = []string{
-			"Unknown command: " + value,
-			"Try: help",
-		}
+		m.composerInput.SetValue("")
+		m.composerInput.Blur()
+		m.commandOutput = nil
+		next, cmd := m.askFromList(value)
+		*m = next
+		return cmd
 	}
 
 	m.appendActivity("Command submitted: " + value)
@@ -456,12 +459,13 @@ func (m model) handleWorkflowLoaded(msg workflowLoadedMsg) (tea.Model, tea.Cmd) 
 	if msg.err != nil {
 		m.workflowsError = msg.err.Error()
 		m.appendActivity("Failed to open workflow: " + truncatePlain(msg.err.Error(), 56))
+		m.agentQueuedPrompt = ""
 		return m, nil
 	}
 
 	m.beginWorkflowEditorFromAPI(msg.flow)
 	m.appendActivity("Opened workflow: " + fallbackString(msg.flow.Name, fmt.Sprintf("Flow %d", msg.flow.ID)))
-	return m, nil
+	return m.sendQueuedPrompt()
 }
 
 func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {

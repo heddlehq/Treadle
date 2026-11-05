@@ -417,7 +417,7 @@ func TestAppScreenFillsTheTerminal(t *testing.T) {
 			t.Fatalf("%v: footer is not on the last line: %q", size, lines[size[1]-1])
 		}
 		inputRow := lines[m.commandInputRect.y]
-		if !strings.Contains(inputRow, "Type a command") {
+		if !strings.Contains(inputRow, "Ask the agent") {
 			t.Fatalf("%v: command input is not on row %d: %q", size, m.commandInputRect.y, inputRow)
 		}
 		for i, line := range lines {
@@ -432,7 +432,7 @@ func editorModel(width, height int) model {
 	m := appModel(width, height)
 	m.beginNewWorkflowEditor()
 	m.reflow()
-	return m
+	return m.closeAIChat()
 }
 
 func TestEditorScreenFillsTheTerminal(t *testing.T) {
@@ -527,7 +527,7 @@ func canvasModel() model {
 	m.editorConnections = nil
 	m.selectedNode = -1
 	m.rebuildNodeRects()
-	return m
+	return m.closeAIChat()
 }
 
 func (m *model) place(kind string, x, y int) editorNode {

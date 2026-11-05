@@ -241,6 +241,7 @@ type model struct {
 	agentCancel          context.CancelFunc
 	agentBusy            bool
 	agentWaitingForSave  bool
+	agentQueuedPrompt    string
 	agentRunRequest      *agentRunRequest
 	agentTurns           []chatTurn
 	modalFocusedControl  int
@@ -285,7 +286,7 @@ func initialModel() model {
 	composerInput := textinput.New()
 	composerInput.SetWidth(0)
 	composerInput.CharLimit = 256
-	composerInput.Placeholder = "Type a command, search workflow, or ask the agent..."
+	composerInput.Placeholder = "Ask the agent about the selected workflow..."
 	composerInput.Prompt = ""
 	composerInput.SetVirtualCursor(true)
 	composerInput.SetStyles(textInputStyles())
@@ -328,6 +329,7 @@ func initialModel() model {
 		modalInput:         modalInput,
 		aiPromptInput:      aiPromptInput,
 		spinner:            sp,
+		aiChatOpen:         true,
 		terminalFocused:    true,
 		selectedNode:       -1,
 		selectedConnection: -1,

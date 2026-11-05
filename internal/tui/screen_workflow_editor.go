@@ -478,7 +478,7 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	return "/ chat  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
+	return "/ agent  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
 }
 
 func (m model) workflowSaveButtonRect() rect {

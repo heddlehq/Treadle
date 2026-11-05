@@ -91,6 +91,30 @@ func (m *model) mcpClient() (*mcp.Client, error) {
 	return m.agentClient, nil
 }
 
+// askFromList takes a message from the workflow list to the editor, about the selected
+// workflow or a new one, and sends it from there.
+func (m model) askFromList(prompt string) (model, tea.Cmd) {
+	m.agentQueuedPrompt = prompt
+
+	next, cmd := m.openSelectedWorkflow()
+	if next.screen != screenWorkflowEditor {
+		return next, cmd
+	}
+
+	sent, send := next.sendQueuedPrompt()
+	return sent, tea.Batch(cmd, send)
+}
+
+func (m model) sendQueuedPrompt() (model, tea.Cmd) {
+	if m.agentQueuedPrompt == "" {
+		return m, nil
+	}
+
+	m.aiPromptInput.SetValue(m.agentQueuedPrompt)
+	m.agentQueuedPrompt = ""
+	return m.submitAIBuilderPrompt()
+}
+
 // submitAIBuilderPrompt sends the message in the input. The agent reads the saved flow,
 // so what is only on this canvas is saved first.
 func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
