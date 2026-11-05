@@ -15,6 +15,7 @@ func (m *model) beginNewWorkflowEditor() {
 }
 
 func (m *model) beginWorkflowEditor(name string) {
+	m.resetAgentChat()
 	m.screen = screenWorkflowEditor
 	m.editorWorkflowID = 0
 	m.editorWorkflowName = fallbackString(name, defaultWorkflowName)
@@ -222,6 +223,11 @@ func (m model) updateWorkflowEditor(msg tea.Msg) (model, tea.Cmd) {
 			m.modalInput, cmd = m.modalInput.Update(msg)
 			return m, cmd
 		}
+		if m.aiPromptInput.Focused() {
+			var cmd tea.Cmd
+			m.aiPromptInput, cmd = m.aiPromptInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -233,11 +239,21 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
 	}
+	if m.agentAwaitingRun {
+		switch msg.String() {
+		case "y":
+			return m.decideAgentRun(true)
+		case "n", "esc":
+			return m.decideAgentRun(false)
+		}
+	}
 	if m.aiPromptInput.Focused() {
-		return m.updateAIBuilderInput(msg), nil
+		return m.updateAIBuilderInput(msg)
 	}
 
 	switch msg.String() {
+	case "/":
+		return m.openAIChat()
 	case "esc":
 		if m.editorMode == editorModeAdd || m.editorMode == editorModeConnect {
 			m.cancelConnection()
@@ -348,9 +364,18 @@ func (m model) renderWorkflowEditor() string {
 	separator := lipgloss.NewStyle().Foreground(panelBorder).Render("│")
 	rule := lipgloss.NewStyle().Foreground(panelBorder).Render
 
+	var chat []string
+	if m.aiChatRect.w > 0 {
+		chat = strings.Split(m.renderAIChatPanel(), "\n")
+	}
+
 	rows := m.renderWorkflowTopBar()
 	for i := range m.paletteRect.h {
-		rows = append(rows, padRightBlank(palette[i], m.paletteRect.w)+separator+canvas[i])
+		row := padRightBlank(palette[i], m.paletteRect.w) + separator + canvas[i]
+		if i < len(chat) {
+			row = padRightBlank(row, m.aiChatRect.x) + chat[i]
+		}
+		rows = append(rows, row)
 	}
 	rows = append(rows,
 		rule(m.ruleWithJunction(m.paletteRect.w, "─", "┴")),
@@ -422,7 +447,7 @@ func (m model) renderWorkflowTopBar() []string {
 		save = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("Save")
 	}
 	right := save + "  "
-	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-6, 8)); status != "" {
+	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-8, 8)); status != "" {
 		right = status + "    " + right
 	}
 
@@ -453,7 +478,7 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	return "c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
+	return "/ chat  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
 }
 
 func (m model) workflowSaveButtonRect() rect {
@@ -588,43 +613,12 @@ func (m model) renderAIChatPanel() string {
 	}
 
 	innerWidth := max(w-4, 1)
-	msgAreaHeight := max(h-5, 1)
+	msgAreaHeight := m.aiChatVisibleLines()
 
 	border := lipgloss.NewStyle().Foreground(panelBorder).Render
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(textColor)
 	mutedStyle := lipgloss.NewStyle().Foreground(mutedTextColor)
-	agentStyle := lipgloss.NewStyle().Foreground(accentColor)
-	userStyle := lipgloss.NewStyle().Foreground(successColor)
-
-	var allDisplayLines []string
-	for _, msg := range m.aiChatMessages {
-		if len(msg) > 5 && msg[:5] == "You: " {
-			header := userStyle.Render("You") + mutedStyle.Render(": ")
-			contentWidth := max(innerWidth-5, 4) // "You: " = 5 chars
-			wrapped := wrapPlainPreserveStyle(msg[5:], contentWidth)
-			for i, line := range wrapped {
-				if i == 0 {
-					allDisplayLines = append(allDisplayLines, header+line)
-				} else {
-					allDisplayLines = append(allDisplayLines, "     "+line)
-				}
-			}
-		} else if len(msg) > 7 && msg[:7] == "Agent: " {
-			header := agentStyle.Render("Agent") + mutedStyle.Render(": ")
-			contentWidth := max(innerWidth-7, 4) // "Agent: " = 7 chars
-			wrapped := wrapPlainPreserveStyle(msg[7:], contentWidth)
-			for i, line := range wrapped {
-				if i == 0 {
-					allDisplayLines = append(allDisplayLines, header+line)
-				} else {
-					allDisplayLines = append(allDisplayLines, "       "+line)
-				}
-			}
-		} else {
-			wrapped := wrapPlainPreserveStyle(msg, innerWidth)
-			allDisplayLines = append(allDisplayLines, wrapped...)
-		}
-	}
+	allDisplayLines := m.aiChatLines(innerWidth)
 
 	offset := clampScroll(m.aiChatScroll, len(allDisplayLines), msgAreaHeight)
 	msgLines := make([]string, msgAreaHeight)
@@ -641,7 +635,11 @@ func (m model) renderAIChatPanel() string {
 	var b strings.Builder
 	b.WriteString(border("╭" + strings.Repeat("─", max(w-2, 0)) + "╮"))
 	b.WriteByte('\n')
-	b.WriteString(border("│ ") + padRightBlank(titleStyle.Render("AI Chat"), innerWidth) + border(" │"))
+	title := titleStyle.Render("Claude Agent")
+	if m.agentBusy {
+		title += mutedStyle.Render(" working...")
+	}
+	b.WriteString(border("│ ") + padRightBlank(title, innerWidth) + border(" │"))
 	for _, line := range msgLines {
 		b.WriteByte('\n')
 		b.WriteString(border("│ ") + padRightBlank(line, innerWidth) + border(" │"))
@@ -683,7 +681,7 @@ func (m model) renderInspectorLines() []string {
 	} else {
 		lines = append(lines, "No node selected.")
 	}
-	lines = append(lines, "", "Drag with mouse to move", "Enter edit  C connect", "A add node  Esc back")
+	lines = append(lines, "", "Drag with mouse to move", "Enter edit  C connect", "A add node  Esc back", "/ chat with the agent")
 	return lines
 }
 
@@ -798,41 +796,24 @@ func (m *model) handleWorkflowEditorWheel(mouse tea.Mouse) {
 
 	switch mouse.Button {
 	case tea.MouseWheelUp:
-		m.aiChatScroll--
+		m.scrollAIChat(-1)
 	case tea.MouseWheelDown:
-		m.aiChatScroll++
+		m.scrollAIChat(1)
 	}
-	m.aiChatScroll = clampScroll(m.aiChatScroll, len(m.aiChatMessages), max(m.aiChatMessagesRect.h, 1))
 }
 
-func (m model) updateAIBuilderInput(msg tea.KeyPressMsg) model {
+func (m model) updateAIBuilderInput(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.aiPromptInput.Blur()
-		return m
+		return m.closeAIChat(), nil
 	}
 	if msg.Code == tea.KeyEnter {
-		m.submitAIBuilderPrompt()
-		return m
+		return m.submitAIBuilderPrompt()
 	}
 
 	var cmd tea.Cmd
 	m.aiPromptInput, cmd = m.aiPromptInput.Update(msg)
-	_ = cmd
-	return m
-}
-
-func (m *model) submitAIBuilderPrompt() {
-	prompt := fallbackString(m.aiPromptInput.Value(), "")
-	if prompt == "" {
-		return
-	}
-	m.aiChatMessages = append(m.aiChatMessages,
-		"You: "+prompt,
-		"Agent: API not connected yet. I would draft nodes for this request.",
-	)
-	m.aiChatScroll = clampScroll(len(m.aiChatMessages), len(m.aiChatMessages), max(m.aiChatMessagesRect.h, 1))
-	m.aiPromptInput.SetValue("")
+	return m, cmd
 }
 
 func (m *model) openWorkflowContextMenu(x, y int) {

@@ -53,6 +53,17 @@ cd Treadle
 go run ./cmd/treadle
 ```
 
+## 🤖 Claude Agent
+
+The chat in the editor runs the [`claude`](https://code.claude.com/docs) CLI on your machine, connected to the MCP server of your Heddle instance. It can read, create and edit your flows, and it asks before running one. Press `/` in the editor to talk to it.
+
+It needs two things:
+
+- `claude` on your `PATH`, or `TREADLE_CLAUDE_BIN` pointing to it.
+- `ANTHROPIC_API_KEY`. Claude subscriptions can't be used here.
+
+`TREADLE_CLAUDE_MAX_BUDGET_USD` limits what one message can spend, and defaults to `1`.
+
 ## 📦 Releasing
 
 The [`VERSION`](VERSION) file is the only place the version is written down, and it's built into the binary.

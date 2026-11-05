@@ -55,6 +55,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleWorkflowLoaded(msg)
 	case workflowSavedMsg:
 		return m.handleWorkflowSaved(msg)
+	case agentEventMsg:
+		return m.handleAgentEvent(msg)
+	case agentFlowLoadedMsg:
+		return m.handleAgentFlowLoaded(msg)
 	}
 
 	var cmds []tea.Cmd

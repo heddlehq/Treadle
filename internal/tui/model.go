@@ -233,23 +233,34 @@ type model struct {
 	editorCreateAtMenu   bool
 	aiChatMessages       []string
 	aiChatScroll         int
+	aiChatOpen           bool
+	agentRun             int
+	agentCancel          context.CancelFunc
+	agentBusy            bool
+	agentReplying        bool
+	agentNewTurn         bool
+	agentFailed          bool
+	agentAwaitingRun     bool
+	agentDeniedFlow      string
+	agentPendingPrompt   string
+	agentSessionID       string
+	agentSessionStarted  bool
 	modalFocusedControl  int
 	modalDraft           []nodeControl
 	nodeRects            map[string]rect
 
-	connectLayout      connectLayout
-	sidebarRect        rect
-	workflowListRect   rect
-	mainRect           rect
-	commandRect        rect
-	commandInputRect   rect
-	canvasRect         rect
-	aiChatRect         rect
-	aiChatMessagesRect rect
-	aiPromptInputRect  rect
-	paletteRect        rect
-	inspectorRect      rect
-	footerRect         rect
+	connectLayout     connectLayout
+	sidebarRect       rect
+	workflowListRect  rect
+	mainRect          rect
+	commandRect       rect
+	commandInputRect  rect
+	canvasRect        rect
+	aiChatRect        rect
+	aiPromptInputRect rect
+	paletteRect       rect
+	inspectorRect     rect
+	footerRect        rect
 }
 
 func initialModel() model {
@@ -290,7 +301,7 @@ func initialModel() model {
 	aiPromptInput := textinput.New()
 	aiPromptInput.SetWidth(0)
 	aiPromptInput.CharLimit = 512
-	aiPromptInput.Placeholder = "Describe the workflow to build..."
+	aiPromptInput.Placeholder = "Ask the agent..."
 	aiPromptInput.Prompt = ""
 	aiPromptInput.SetVirtualCursor(true)
 	aiPromptInput.SetStyles(textInputStyles())
@@ -309,24 +320,16 @@ func initialModel() model {
 	}
 
 	return model{
-		savedSession:  session,
-		connecting:    hasSession,
-		activeMethod:  fallbackString(session.Method, loginAPIKey),
-		screen:        screenConnect,
-		hostInput:     hostInput,
-		apiKeyInput:   apiKeyInput,
-		composerInput: composerInput,
-		modalInput:    modalInput,
-		aiPromptInput: aiPromptInput,
-		spinner:       sp,
-		aiChatMessages: []string{
-			"Agent: Olá! Descreva o workflow que deseja construir.",
-			"You: Quero um workflow que processa CSV e salva no banco",
-			"Agent: Entendido! Vou criar: Start → Evaluate Code → Variable → Output",
-			"Agent: Adicionei um nó de leitura de CSV. Configure o caminho do arquivo no inspector.",
-			"You: Adiciona também validação de dados",
-			"Agent: Nó de validação adicionado entre o CSV e o banco. Use o inspector para definir as regras.",
-		},
+		savedSession:       session,
+		connecting:         hasSession,
+		activeMethod:       fallbackString(session.Method, loginAPIKey),
+		screen:             screenConnect,
+		hostInput:          hostInput,
+		apiKeyInput:        apiKeyInput,
+		composerInput:      composerInput,
+		modalInput:         modalInput,
+		aiPromptInput:      aiPromptInput,
+		spinner:            sp,
 		terminalFocused:    true,
 		selectedNode:       -1,
 		selectedConnection: -1,
