@@ -236,6 +236,7 @@ type model struct {
 	aiChatMessages       []string
 	aiChatScroll         int
 	aiChatOpen           bool
+	agentUnread          bool
 	agentClient          *mcp.Client
 	agentRun             int
 	agentCancel          context.CancelFunc
@@ -300,7 +301,7 @@ func initialModel() model {
 	aiPromptInput := textinput.New()
 	aiPromptInput.SetWidth(0)
 	aiPromptInput.CharLimit = 512
-	aiPromptInput.Placeholder = "Ask the agent..."
+	aiPromptInput.Placeholder = "Ask the agent to build or change this flow..."
 	aiPromptInput.Prompt = ""
 	aiPromptInput.SetVirtualCursor(true)
 	aiPromptInput.SetStyles(textInputStyles())
@@ -329,7 +330,6 @@ func initialModel() model {
 		modalInput:         modalInput,
 		aiPromptInput:      aiPromptInput,
 		spinner:            sp,
-		aiChatOpen:         true,
 		terminalFocused:    true,
 		selectedNode:       -1,
 		selectedConnection: -1,

@@ -25,13 +25,10 @@ const (
 	// keep it waiting.
 	agentTimeout = 7 * time.Minute
 
-	// Top border, title, divider, the input with its border, and the bottom border.
-	aiChatChromeHeight = 7
-	aiChatInputHeight  = 3
+	// The rule on top and the input.
+	aiChatChromeHeight = 2
 
-	minChatWidth           = 30
-	maxChatWidth           = 52
-	minCanvasWidthWithChat = 20
+	minCanvasHeightWithChat = 5
 )
 
 // chatTurn is one message of the conversation. Heddle keeps no history: all of it goes
@@ -110,9 +107,12 @@ func (m model) sendQueuedPrompt() (model, tea.Cmd) {
 		return m, nil
 	}
 
+	m, focus := m.openAIChat()
 	m.aiPromptInput.SetValue(m.agentQueuedPrompt)
 	m.agentQueuedPrompt = ""
-	return m.submitAIBuilderPrompt()
+
+	m, send := m.submitAIBuilderPrompt()
+	return m, tea.Batch(focus, send)
 }
 
 // submitAIBuilderPrompt sends the message in the input. The agent reads the saved flow,
@@ -212,7 +212,7 @@ func (m model) handleAgentReply(msg agentReplyMsg) (tea.Model, tea.Cmd) {
 	if msg.reply.RunRequest != nil {
 		m.agentRunRequest = msg.reply.RunRequest
 		m.aiChatOpen = true
-		m.reflow()
+		m.agentUnread = false
 		m.appendChat(agentMessagePrefix + fmt.Sprintf(
 			"Run %q? It can have real side effects. [y] run  [n] don't run", msg.reply.RunRequest.Name))
 	}
@@ -325,16 +325,32 @@ func (m model) handleAgentFlowLoaded(msg agentFlowLoadedMsg) (tea.Model, tea.Cmd
 	return next, loadWorkflowsCmd(m.activeHost, m.activeAPIKey)
 }
 
-// openAIChat shows the panel and puts the cursor in it, if the terminal has the room.
+// aiChatHeight fits the conversation, so an empty chat only takes the input and a long
+// one a third of the editor, and leaves it all to the canvas when there isn't room.
+func (m model) aiChatHeight(width, bodyHeight int) int {
+	if !m.aiChatOpen {
+		return 0
+	}
+
+	lines := len(m.aiChatLines(max(width-4, 1)))
+	height := aiChatChromeHeight + min(lines, bodyHeight/3)
+	if bodyHeight-aiChatChromeHeight-bodyHeight/3 < minCanvasHeightWithChat {
+		return 0
+	}
+	return height
+}
+
+// openAIChat shows the bar and puts the cursor in it, if the terminal has the room.
 func (m model) openAIChat() (model, tea.Cmd) {
 	m.aiChatOpen = true
 	m.reflow()
-	if m.aiChatRect.w == 0 {
+	if m.aiChatRect.h == 0 {
 		m.aiChatOpen = false
 		m.reflow()
-		m.editorStatusMessage = "The terminal is too narrow for the chat"
+		m.editorStatusMessage = "The terminal is too small for the chat"
 		return m, nil
 	}
+	m.agentUnread = false
 	m.scrollAIChatToEnd()
 	return m, m.aiPromptInput.Focus()
 }
@@ -355,18 +371,24 @@ func (m *model) resetAgentChat() {
 	m.agentBusy = false
 	m.agentWaitingForSave = false
 	m.agentRunRequest = nil
+	m.agentUnread = false
 	m.agentTurns = nil
 	m.aiChatMessages = nil
 	m.aiChatScroll = 0
+	m.aiChatOpen = false
+	m.aiPromptInput.Blur()
+	m.reflow()
 }
 
 func (m *model) appendChat(message string) {
 	m.aiChatMessages = append(m.aiChatMessages, message)
+	m.agentUnread = !m.aiChatOpen
+	m.reflow()
 	m.scrollAIChatToEnd()
 }
 
 func (m model) aiChatVisibleLines() int {
-	return max(m.aiChatRect.h-aiChatChromeHeight, 1)
+	return max(m.aiChatRect.h-aiChatChromeHeight, 0)
 }
 
 func (m model) aiChatLineCount() int {
@@ -381,18 +403,10 @@ func (m *model) scrollAIChat(delta int) {
 	m.aiChatScroll = clampScroll(m.aiChatScroll+delta, m.aiChatLineCount(), m.aiChatVisibleLines())
 }
 
-// aiChatLines is what the panel shows, wrapped to width. Scrolling counts these and
+// aiChatLines is what the bar shows, wrapped to width. Scrolling counts these and
 // not the messages, or a long reply could never be read to its end.
 func (m model) aiChatLines(width int) []string {
 	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
-
-	if len(m.aiChatMessages) == 0 {
-		var lines []string
-		for _, line := range wrapWords("Ask the agent to build or change this flow.", width) {
-			lines = append(lines, muted.Render(line))
-		}
-		return lines
-	}
 
 	agentLabel := lipgloss.NewStyle().Foreground(accentColor).Render("Agent") + muted.Render(": ")
 	userLabel := lipgloss.NewStyle().Foreground(successColor).Render("You") + muted.Render(": ")

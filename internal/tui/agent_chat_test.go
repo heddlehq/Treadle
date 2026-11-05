@@ -205,7 +205,7 @@ func TestChatIsBusyWhileTheServerThinks(t *testing.T) {
 	if !m.agentBusy || cmd == nil {
 		t.Fatal("should be waiting")
 	}
-	if !strings.Contains(m.renderAIChatPanel(), "working") {
+	if !strings.Contains(strings.Join(m.renderAIChatBar(), "\n"), "working") {
 		t.Fatal("nothing says it's working")
 	}
 }
@@ -468,7 +468,7 @@ func TestLongRepliesCanBeReadToTheEnd(t *testing.T) {
 
 	m := say(t, chatModel(t, fake), "hi")
 
-	if !strings.Contains(m.renderAIChatPanel(), "the end") {
+	if !strings.Contains(strings.Join(m.renderAIChatBar(), "\n"), "the end") {
 		t.Fatal("the end of the reply is out of reach")
 	}
 }
@@ -507,48 +507,122 @@ func editorWithoutChat(width, height int) model {
 	return m
 }
 
-func TestChatIsThereWhenTheEditorOpens(t *testing.T) {
+func TestTheCanvasKeepsTheWholeScreenUntilTheChatIsAsked(t *testing.T) {
 	m := editorWithoutChat(140, 40)
 
-	if !onScreen(m, "Ask the agent to build") {
+	if m.aiChatOpen || m.aiChatRect.h != 0 || m.canvasRect.h != m.paletteRect.h {
+		t.Fatalf("open = %v chat = %+v canvas = %+v", m.aiChatOpen, m.aiChatRect, m.canvasRect)
+	}
+	if m.canvasRect.x+m.canvasRect.w != m.width {
+		t.Fatalf("canvas = %+v", m.canvasRect)
+	}
+	if !onScreen(m, "/ agent") {
 		t.Fatal("nobody would find the chat")
 	}
-	if m.aiPromptInput.Focused() {
-		t.Fatal("the editor's shortcuts should keep working")
-	}
 }
 
-func TestSlashFocusesTheChat(t *testing.T) {
-	next, _ := editorWithoutChat(140, 40).Update(keyPress("/"))
-
-	if !next.(model).aiPromptInput.Focused() {
-		t.Fatal("should be focused")
-	}
-}
-
-func TestSlashBringsTheChatBack(t *testing.T) {
-	m := editorWithoutChat(140, 40).closeAIChat()
-	wide := m.canvasRect.w
+func TestSlashOpensAThinBarUnderTheCanvas(t *testing.T) {
+	m := editorWithoutChat(140, 40)
+	wide, tall := m.canvasRect.w, m.canvasRect.h
 
 	next, _ := m.Update(keyPress("/"))
 	m = next.(model)
 
-	if !onScreen(m, "Ask the agent to build") {
-		t.Fatal("the panel isn't on screen")
+	if !m.aiPromptInput.Focused() {
+		t.Fatal("should be focused")
 	}
-	if m.canvasRect.w >= wide {
-		t.Fatal("the canvas should make room")
+	if !onScreen(m, "Ask the agent") {
+		t.Fatal("the input isn't on screen")
+	}
+	if m.canvasRect.w != wide {
+		t.Fatalf("canvas went from %d to %d wide", wide, m.canvasRect.w)
+	}
+	if m.canvasRect.h != tall-aiChatChromeHeight {
+		t.Fatalf("canvas went from %d to %d tall", tall, m.canvasRect.h)
 	}
 }
 
-func TestANarrowTerminalKeepsTheCanvas(t *testing.T) {
-	m := editorWithoutChat(72, 24)
+func TestTheBarGrowsWithTheConversationUpToAThird(t *testing.T) {
+	m := chatModel(t, heddle(t, reply(strings.Repeat("a long reply ", 200))))
+	body := m.paletteRect.h
 
-	if onScreen(m, "Ask the agent to build") {
-		t.Fatal("no room for the panel")
+	m = say(t, m, "hi")
+
+	if m.aiChatRect.h != aiChatChromeHeight+body/3 {
+		t.Fatalf("chat = %d of %d", m.aiChatRect.h, body)
 	}
-	if m.canvasRect.w < 40 {
-		t.Fatalf("canvas = %d", m.canvasRect.w)
+	if m.canvasRect.h+m.aiChatRect.h != body {
+		t.Fatalf("canvas = %d chat = %d body = %d", m.canvasRect.h, m.aiChatRect.h, body)
+	}
+	if !onScreen(m, "a long reply") {
+		t.Fatal("the reply isn't on screen")
+	}
+}
+
+func TestAClickOnTheBarDoesNotReachTheCanvas(t *testing.T) {
+	m := chatModel(t, heddle(t, ""))
+
+	if inside(m.aiPromptInputRect.x, m.aiPromptInputRect.y, m.canvasRect) {
+		t.Fatalf("input = %+v canvas = %+v", m.aiPromptInputRect, m.canvasRect)
+	}
+}
+
+func TestATinyTerminalKeepsTheCanvas(t *testing.T) {
+	next, _ := editorWithoutChat(72, 8).Update(keyPress("/"))
+	m := next.(model)
+
+	if m.aiChatOpen || m.aiPromptInput.Focused() {
+		t.Fatal("no room for the bar")
+	}
+}
+
+func TestEscClosesTheBarBeforeLeavingTheEditor(t *testing.T) {
+	m := chatModel(t, heddle(t, ""))
+	m.aiPromptInput.Blur()
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = next.(model)
+
+	if m.aiChatOpen || m.screen != screenWorkflowEditor {
+		t.Fatalf("open = %v screen = %v", m.aiChatOpen, m.screen)
+	}
+}
+
+func TestTheFooterSaysWhatTheAgentDidWhileTheBarWasClosed(t *testing.T) {
+	m, cmd := send(t, chatModel(t, heddle(t, reply("done"))), "hi")
+	m = m.closeAIChat()
+
+	if !onScreen(m, "/ agent working") {
+		t.Fatal("nothing says it's working")
+	}
+
+	m = settle(t, m, cmd)
+	if !onScreen(m, "/ agent replied") {
+		t.Fatal("nothing says it replied")
+	}
+
+	next, _ := m.Update(keyPress("/"))
+	m = next.(model)
+	if !onScreen(m, "done") || onScreen(m, "replied") {
+		t.Fatal("opening should show the reply and clear the notice")
+	}
+}
+
+func TestTheFooterShowsTheKeysOfTheQuestion(t *testing.T) {
+	m := say(t, chatModel(t, heddle(t, runRequest("Ready."))), "run it")
+
+	if !onScreen(m, "y run") {
+		t.Fatal("the keys aren't on screen")
+	}
+}
+
+func TestAnotherFlowStartsWithTheBarClosed(t *testing.T) {
+	m := say(t, chatModel(t, heddle(t, reply("hello"))), "hi")
+
+	m.beginWorkflowEditorFromAPI(apiFlow{ID: 8, Name: "Other"})
+
+	if m.aiChatOpen || m.aiPromptInput.Focused() || m.aiChatRect.h != 0 {
+		t.Fatalf("open = %v chat = %+v", m.aiChatOpen, m.aiChatRect)
 	}
 }
 
@@ -610,7 +684,7 @@ func TestAFailedOpenDropsTheMessage(t *testing.T) {
 }
 
 func TestChatFitsTheScreen(t *testing.T) {
-	for _, size := range [][2]int{{72, 16}, {100, 30}, {140, 40}, {220, 60}} {
+	for _, size := range [][2]int{{72, 12}, {72, 16}, {100, 30}, {140, 40}, {220, 60}} {
 		next, _ := editorWithoutChat(size[0], size[1]).Update(keyPress("/"))
 		m := next.(model)
 

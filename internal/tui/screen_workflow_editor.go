@@ -263,6 +263,9 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 			m.clearSelection()
 			return m, nil
 		}
+		if m.aiChatOpen {
+			return m.closeAIChat(), nil
+		}
 		m.screen = screenApp
 		return m, nil
 	case "ctrl+z":
@@ -365,15 +368,17 @@ func (m model) renderWorkflowEditor() string {
 	rule := lipgloss.NewStyle().Foreground(panelBorder).Render
 
 	var chat []string
-	if m.aiChatRect.w > 0 {
-		chat = strings.Split(m.renderAIChatPanel(), "\n")
+	if m.aiChatRect.h > 0 {
+		chat = m.renderAIChatBar()
 	}
 
 	rows := m.renderWorkflowTopBar()
 	for i := range m.paletteRect.h {
-		row := padRightBlank(palette[i], m.paletteRect.w) + separator + canvas[i]
-		if i < len(chat) {
-			row = padRightBlank(row, m.aiChatRect.x) + chat[i]
+		row := padRightBlank(palette[i], m.paletteRect.w) + separator
+		if i < m.canvasRect.h {
+			row += canvas[i]
+		} else {
+			row += chat[i-m.canvasRect.h]
 		}
 		rows = append(rows, row)
 	}
@@ -478,7 +483,24 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	return "/ agent  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
+	if m.agentRunRequest != nil {
+		return "y run  n don't run"
+	}
+	if m.aiPromptInput.Focused() {
+		return "⏎ send  esc close"
+	}
+	return m.agentHint() + "  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
+}
+
+// agentHint is also how a reply reaches someone who closed the bar.
+func (m model) agentHint() string {
+	switch {
+	case m.agentBusy && !m.aiChatOpen:
+		return "/ agent working..."
+	case m.agentUnread:
+		return "/ agent replied"
+	}
+	return "/ agent"
 }
 
 func (m model) workflowSaveButtonRect() rect {
@@ -605,66 +627,35 @@ func (m model) paletteNodeKindAtRow(row int) (string, bool) {
 	return kind, kind != ""
 }
 
-func (m model) renderAIChatPanel() string {
-	w := m.aiChatRect.w
-	h := m.aiChatRect.h
-	if w <= 0 || h <= 0 {
-		return ""
+// renderAIChatBar has the look of the command bar of the workflow list: a rule, the
+// conversation and the input.
+func (m model) renderAIChatBar() []string {
+	ruleColor := panelBorder
+	ruleChar := "─"
+	promptColor := mutedTextColor
+	if m.aiPromptInput.Focused() {
+		ruleColor = accentColor
+		ruleChar = "━"
+		promptColor = accentColor
 	}
 
-	innerWidth := max(w-4, 1)
-	msgAreaHeight := m.aiChatVisibleLines()
-
-	border := lipgloss.NewStyle().Foreground(panelBorder).Render
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(textColor)
-	mutedStyle := lipgloss.NewStyle().Foreground(mutedTextColor)
-	allDisplayLines := m.aiChatLines(innerWidth)
-
-	offset := clampScroll(m.aiChatScroll, len(allDisplayLines), msgAreaHeight)
-	msgLines := make([]string, msgAreaHeight)
-	for row := 0; row < msgAreaHeight; row++ {
-		index := offset + row
-		if index < len(allDisplayLines) {
-			msgLines[row] = allDisplayLines[index]
-		}
-	}
-
-	inputWidth := max(w-4, 1)
-	inputLine := renderInputBlock(m.aiPromptInput.View(), inputWidth, m.aiPromptInput.Focused())
-
-	var b strings.Builder
-	b.WriteString(border("╭" + strings.Repeat("─", max(w-2, 0)) + "╮"))
-	b.WriteByte('\n')
-	title := titleStyle.Render("Agent")
+	title := "Agent"
 	if m.agentBusy {
-		title += mutedStyle.Render(" working...")
+		title += " working..."
 	}
-	b.WriteString(border("│ ") + padRightBlank(title, innerWidth) + border(" │"))
-	for _, line := range msgLines {
-		b.WriteByte('\n')
-		b.WriteString(border("│ ") + padRightBlank(line, innerWidth) + border(" │"))
-	}
-	b.WriteByte('\n')
-	b.WriteString(border("├" + strings.Repeat("─", max(w-2, 0)) + "┤"))
+	lead := strings.Repeat(ruleChar, 2) + " "
+	fill := strings.Repeat(ruleChar, max(m.aiChatRect.w-lipgloss.Width(lead+title)-1, 0))
+	rule := lipgloss.NewStyle().Foreground(ruleColor).Render
+	rows := []string{rule(lead) + lipgloss.NewStyle().Foreground(mutedTextColor).Render(title) + rule(" "+fill)}
 
-	leftPadding := (innerWidth - inputWidth) / 2
-	if leftPadding < 0 {
-		leftPadding = 0
+	lines := m.aiChatLines(max(m.aiChatRect.w-4, 1))
+	visible := m.aiChatVisibleLines()
+	offset := clampScroll(m.aiChatScroll, len(lines), visible)
+	for _, line := range lines[offset:min(offset+visible, len(lines))] {
+		rows = append(rows, "  "+line)
 	}
-	padStr := strings.Repeat(" ", leftPadding)
 
-	for _, line := range strings.Split(inputLine, "\n") {
-		b.WriteByte('\n')
-		rightPadding := innerWidth - lipgloss.Width(padStr+line)
-		if rightPadding < 0 {
-			rightPadding = 0
-		}
-		rightPadStr := strings.Repeat(" ", rightPadding)
-		b.WriteString(border("│ ") + padStr + line + rightPadStr + border(" │"))
-	}
-	b.WriteByte('\n')
-	b.WriteString(border("╰" + strings.Repeat("─", max(w-2, 0)) + "╯"))
-	return b.String()
+	return append(rows, "  "+lipgloss.NewStyle().Foreground(promptColor).Render("› ")+m.aiPromptInput.View())
 }
 
 func (m model) renderInspectorLines() []string {

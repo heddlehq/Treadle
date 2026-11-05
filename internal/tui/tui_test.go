@@ -432,7 +432,7 @@ func editorModel(width, height int) model {
 	m := appModel(width, height)
 	m.beginNewWorkflowEditor()
 	m.reflow()
-	return m.closeAIChat()
+	return m
 }
 
 func TestEditorScreenFillsTheTerminal(t *testing.T) {
@@ -527,7 +527,7 @@ func canvasModel() model {
 	m.editorConnections = nil
 	m.selectedNode = -1
 	m.rebuildNodeRects()
-	return m.closeAIChat()
+	return m
 }
 
 func (m *model) place(kind string, x, y int) editorNode {
