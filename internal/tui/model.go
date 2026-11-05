@@ -8,6 +8,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"treadle/internal/mcp"
 )
 
 const (
@@ -234,17 +236,13 @@ type model struct {
 	aiChatMessages       []string
 	aiChatScroll         int
 	aiChatOpen           bool
+	agentClient          *mcp.Client
 	agentRun             int
 	agentCancel          context.CancelFunc
 	agentBusy            bool
-	agentReplying        bool
-	agentNewTurn         bool
-	agentFailed          bool
-	agentAwaitingRun     bool
-	agentDeniedFlow      string
-	agentPendingPrompt   string
-	agentSessionID       string
-	agentSessionStarted  bool
+	agentWaitingForSave  bool
+	agentRunRequest      *agentRunRequest
+	agentTurns           []chatTurn
 	modalFocusedControl  int
 	modalDraft           []nodeControl
 	nodeRects            map[string]rect

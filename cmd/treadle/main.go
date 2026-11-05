@@ -25,9 +25,7 @@ func main() {
 
 	p := tui.NewProgram()
 
-	_, err := p.Run()
-	tui.StopAgent()
-	if err != nil {
+	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
 	}
 }

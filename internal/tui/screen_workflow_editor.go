@@ -239,7 +239,7 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
 	}
-	if m.agentAwaitingRun {
+	if m.agentRunRequest != nil {
 		switch msg.String() {
 		case "y":
 			return m.decideAgentRun(true)
@@ -635,7 +635,7 @@ func (m model) renderAIChatPanel() string {
 	var b strings.Builder
 	b.WriteString(border("╭" + strings.Repeat("─", max(w-2, 0)) + "╮"))
 	b.WriteByte('\n')
-	title := titleStyle.Render("Claude Agent")
+	title := titleStyle.Render("Agent")
 	if m.agentBusy {
 		title += mutedStyle.Render(" working...")
 	}

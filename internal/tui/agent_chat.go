@@ -2,21 +2,28 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"treadle/internal/agent"
+	"treadle/internal/mcp"
 )
 
 const (
 	agentMessagePrefix = "Agent: "
 	userMessagePrefix  = "You: "
+
+	// The server thinks and calls its tools before it answers, and a confirmation can
+	// keep it waiting.
+	agentTimeout = 7 * time.Minute
 
 	// Top border, title, divider, the input with its border, and the bottom border.
 	aiChatChromeHeight = 7
@@ -27,35 +34,39 @@ const (
 	minCanvasWidthWithChat = 20
 )
 
-var (
-	agentRoot, stopAgents = context.WithCancel(context.Background())
-
-	// startAgent is replaced in tests.
-	startAgent = agent.Start
-)
-
-// StopAgent kills a running agent, which would otherwise outlive the program.
-func StopAgent() {
-	stopAgents()
+// chatTurn is one message of the conversation. Heddle keeps no history: all of it goes
+// with every message.
+type chatTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type agentEventMsg struct {
-	run    int
-	events <-chan agent.Event
-	event  agent.Event
-	closed bool
+type agentRunRequest struct {
+	FlowID int            `json:"flow_id"`
+	Name   string         `json:"name"`
+	Input  map[string]any `json:"input"`
+}
+
+type agentReply struct {
+	Reply      string           `json:"reply"`
+	RunRequest *agentRunRequest `json:"run_request"`
+}
+
+type agentReplyMsg struct {
+	run   int
+	reply agentReply
+	err   error
+}
+
+type agentRunStartedMsg struct {
+	run         int
+	executionID string
+	err         error
 }
 
 type agentFlowLoadedMsg struct {
 	flow apiFlow
 	err  error
-}
-
-func waitForAgent(run int, events <-chan agent.Event) tea.Cmd {
-	return func() tea.Msg {
-		event, ok := <-events
-		return agentEventMsg{run: run, events: events, event: event, closed: !ok}
-	}
 }
 
 func reloadAfterAgentCmd(host, apiKey string, workflowID int) tea.Cmd {
@@ -66,25 +77,35 @@ func reloadAfterAgentCmd(host, apiKey string, workflowID int) tea.Cmd {
 	}
 }
 
+// mcpClient reuses the connection for as long as the login stays the same.
+func (m *model) mcpClient() (*mcp.Client, error) {
+	baseURL, err := normalizeBaseURL(m.activeHost)
+	if err != nil {
+		return nil, err
+	}
+
+	url := baseURL + "/mcp"
+	if m.agentClient == nil || m.agentClient.URL != url || m.agentClient.Token != m.activeAPIKey {
+		m.agentClient = &mcp.Client{URL: url, Token: m.activeAPIKey}
+	}
+	return m.agentClient, nil
+}
+
 // submitAIBuilderPrompt sends the message in the input. The agent reads the saved flow,
 // so what is only on this canvas is saved first.
 func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
 	prompt := strings.TrimSpace(m.aiPromptInput.Value())
-	if prompt == "" || m.agentBusy || m.agentAwaitingRun {
+	if prompt == "" || m.agentBusy || m.agentRunRequest != nil {
 		return m, nil
 	}
 
 	m.aiPromptInput.SetValue("")
 	m.appendChat(userMessagePrefix + prompt)
-
-	if problem := agent.Problem(); problem != "" {
-		m.appendChat(agentMessagePrefix + problem)
-		return m, nil
-	}
-
+	m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: prompt})
 	m.agentBusy = true
+
 	if m.editorDirty || m.editorWorkflowID == 0 {
-		m.agentPendingPrompt = prompt
+		m.agentWaitingForSave = true
 		cmd := m.saveCurrentWorkflow()
 		if cmd == nil && !m.editorSaving {
 			m.abortPendingAgent()
@@ -92,104 +113,90 @@ func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
 		return m, cmd
 	}
 
-	return m.startAgentRun(prompt, false)
+	return m.askAgent()
 }
 
 func (m *model) abortPendingAgent() {
-	m.agentPendingPrompt = ""
+	m.agentWaitingForSave = false
 	m.agentBusy = false
+	m.agentTurns = m.agentTurns[:max(len(m.agentTurns)-1, 0)]
 	m.appendChat(agentMessagePrefix + "The flow couldn't be saved, so nothing was sent.")
 }
 
-func (m model) startAgentRun(prompt string, allowRun bool) (model, tea.Cmd) {
-	baseURL, err := normalizeBaseURL(m.activeHost)
+// askAgent sends the conversation to the chat tool of the server.
+func (m model) askAgent() (model, tea.Cmd) {
+	client, err := m.mcpClient()
 	if err != nil {
 		m.agentBusy = false
 		m.appendChat(agentMessagePrefix + err.Error())
 		return m, nil
 	}
 
-	if m.agentSessionID == "" {
-		m.agentSessionID = agent.NewSessionID()
-	}
-
-	ctx, cancel := context.WithCancel(agentRoot)
-	events, err := startAgent(ctx, agent.Options{
-		Binary:    agent.Binary(),
-		APIKey:    agent.APIKey(),
-		Prompt:    prompt,
-		System:    agent.SystemPrompt(m.editorWorkflowID, m.editorWorkflowName),
-		MCPURL:    baseURL + "/mcp",
-		Token:     m.activeAPIKey,
-		SessionID: m.agentSessionID,
-		Resume:    m.agentSessionStarted,
-		AllowRun:  allowRun,
-		Budget:    agent.Budget(),
-	})
-	if err != nil {
-		cancel()
-		m.agentBusy = false
-		m.appendChat(agentMessagePrefix + "The agent couldn't start: " + err.Error())
-		return m, nil
+	arguments := map[string]any{"messages": append([]chatTurn{}, m.agentTurns...)}
+	if m.editorWorkflowID != 0 {
+		arguments["flow_id"] = fmt.Sprint(m.editorWorkflowID)
 	}
 
 	m.agentRun++
-	m.agentCancel = cancel
-	m.agentBusy = true
-	m.agentReplying = false
-	m.agentFailed = false
-	m.agentDeniedFlow = ""
-	return m, waitForAgent(m.agentRun, events)
+	run := m.agentRun
+	ctx := m.agentContext()
+
+	return m, func() tea.Msg {
+		text, err := client.Call(ctx, "chat", arguments)
+		if err != nil {
+			return agentReplyMsg{run: run, err: err}
+		}
+
+		var reply agentReply
+		if err := json.Unmarshal([]byte(text), &reply); err != nil {
+			return agentReplyMsg{run: run, err: fmt.Errorf("invalid reply: %w", err)}
+		}
+		return agentReplyMsg{run: run, reply: reply}
+	}
 }
 
-func (m model) handleAgentEvent(msg agentEventMsg) (tea.Model, tea.Cmd) {
+func (m *model) agentContext() context.Context {
+	if m.agentCancel != nil {
+		m.agentCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout)
+	m.agentCancel = cancel
+	return ctx
+}
+
+func (m model) handleAgentReply(msg agentReplyMsg) (tea.Model, tea.Cmd) {
 	// From a conversation that is already over.
 	if msg.run != m.agentRun {
 		return m, nil
 	}
-	if msg.closed {
-		return m.finishAgentRun()
-	}
-
-	switch msg.event.Type {
-	case agent.EventTurn:
-		m.agentNewTurn = true
-	case agent.EventText:
-		m.appendAgentText(msg.event.Text)
-	case agent.EventError:
-		m.agentFailed = true
-		m.agentReplying = false
-		m.appendChat(agentMessagePrefix + msg.event.Text)
-	case agent.EventRunDenied:
-		m.agentDeniedFlow = fallbackString(msg.event.FlowID, fmt.Sprint(m.editorWorkflowID))
-	}
-	return m, waitForAgent(msg.run, msg.events)
-}
-
-func (m model) finishAgentRun() (tea.Model, tea.Cmd) {
-	if m.agentCancel != nil {
-		m.agentCancel()
-		m.agentCancel = nil
-	}
 	m.agentBusy = false
-	m.agentReplying = false
 
-	switch {
-	case !m.agentFailed:
-		m.agentSessionStarted = true
-	case !m.agentSessionStarted:
-		// The id may be taken by the half of a session that failed.
-		m.agentSessionID = ""
+	if msg.err != nil {
+		if errors.Is(msg.err, mcp.ErrUnauthorized) {
+			return m.returnToConnect()
+		}
+		m.agentTurns = m.agentTurns[:max(len(m.agentTurns)-1, 0)]
+		m.appendChat(agentMessagePrefix + msg.err.Error())
+		return m, nil
 	}
 
-	if m.agentDeniedFlow != "" && !m.agentFailed {
-		m.agentAwaitingRun = true
+	m.agentTurns = append(m.agentTurns, chatTurn{Role: "assistant", Content: msg.reply.Reply})
+	if msg.reply.Reply != "" {
+		m.appendChat(agentMessagePrefix + msg.reply.Reply)
+	}
+
+	if msg.reply.RunRequest != nil {
+		m.agentRunRequest = msg.reply.RunRequest
 		m.aiChatOpen = true
 		m.reflow()
 		m.appendChat(agentMessagePrefix + fmt.Sprintf(
-			"Run flow %s? It can have real side effects. [y] run  [n] don't run", m.agentDeniedFlow))
+			"Run %q? It can have real side effects. [y] run  [n] don't run", msg.reply.RunRequest.Name))
 	}
 
+	return m.reloadAfterAgent()
+}
+
+func (m model) reloadAfterAgent() (model, tea.Cmd) {
 	if m.editorWorkflowID == 0 {
 		return m, nil
 	}
@@ -200,16 +207,68 @@ func (m model) finishAgentRun() (tea.Model, tea.Cmd) {
 	return m, reloadAfterAgentCmd(m.activeHost, m.activeAPIKey, m.editorWorkflowID)
 }
 
+// decideAgentRun answers the question. The server never runs a flow from the chat:
+// that only happens here, with a call a person asked for.
 func (m model) decideAgentRun(approved bool) (model, tea.Cmd) {
-	m.agentAwaitingRun = false
+	request := m.agentRunRequest
+	m.agentRunRequest = nil
+
 	if !approved {
 		m.appendChat(userMessagePrefix + "Don't run it.")
+		m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: "Don't run it."})
 		return m, nil
 	}
 
-	flow := m.agentDeniedFlow
 	m.appendChat(userMessagePrefix + "Run it.")
-	return m.startAgentRun(fmt.Sprintf("The user confirmed: run flow %s now, once.", flow), true)
+	m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: "Run it."})
+
+	client, err := m.mcpClient()
+	if err != nil {
+		m.appendChat(agentMessagePrefix + err.Error())
+		return m, nil
+	}
+
+	arguments := map[string]any{"flow_id": fmt.Sprint(request.FlowID)}
+	if request.Input != nil {
+		arguments["input"] = request.Input
+	}
+
+	m.agentBusy = true
+	m.agentRun++
+	run := m.agentRun
+	ctx := m.agentContext()
+
+	return m, func() tea.Msg {
+		text, err := client.Call(ctx, "run_flow", arguments)
+		if err != nil {
+			return agentRunStartedMsg{run: run, err: err}
+		}
+
+		var execution struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(text), &execution); err != nil {
+			return agentRunStartedMsg{run: run, err: fmt.Errorf("invalid reply: %w", err)}
+		}
+		return agentRunStartedMsg{run: run, executionID: execution.ID}
+	}
+}
+
+func (m model) handleAgentRunStarted(msg agentRunStartedMsg) (tea.Model, tea.Cmd) {
+	if msg.run != m.agentRun {
+		return m, nil
+	}
+	m.agentBusy = false
+
+	text := "The flow couldn't start: "
+	if msg.err != nil {
+		text += msg.err.Error()
+	} else {
+		text = "Started execution " + msg.executionID + "."
+	}
+	m.agentTurns = append(m.agentTurns, chatTurn{Role: "assistant", Content: text})
+	m.appendChat(agentMessagePrefix + text)
+	return m, nil
 }
 
 // handleAgentFlowLoaded brings in what the agent saved, keeping the view where it is.
@@ -270,35 +329,15 @@ func (m *model) resetAgentChat() {
 	}
 	m.agentRun++
 	m.agentBusy = false
-	m.agentReplying = false
-	m.agentNewTurn = false
-	m.agentFailed = false
-	m.agentAwaitingRun = false
-	m.agentDeniedFlow = ""
-	m.agentPendingPrompt = ""
-	m.agentSessionID = ""
-	m.agentSessionStarted = false
+	m.agentWaitingForSave = false
+	m.agentRunRequest = nil
+	m.agentTurns = nil
 	m.aiChatMessages = nil
 	m.aiChatScroll = 0
 }
 
 func (m *model) appendChat(message string) {
 	m.aiChatMessages = append(m.aiChatMessages, message)
-	m.scrollAIChatToEnd()
-}
-
-func (m *model) appendAgentText(text string) {
-	if !m.agentReplying {
-		m.agentReplying = true
-		m.agentNewTurn = false
-		m.appendChat(agentMessagePrefix + text)
-		return
-	}
-	if m.agentNewTurn {
-		text = "\n\n" + text
-	}
-	m.agentNewTurn = false
-	m.aiChatMessages[len(m.aiChatMessages)-1] += text
 	m.scrollAIChatToEnd()
 }
 
@@ -324,9 +363,8 @@ func (m model) aiChatLines(width int) []string {
 	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
 
 	if len(m.aiChatMessages) == 0 {
-		notice := fallbackString(agent.Problem(), "Ask the agent to build or change this flow.")
 		var lines []string
-		for _, line := range wrapWords(notice, width) {
+		for _, line := range wrapWords("Ask the agent to build or change this flow.", width) {
 			lines = append(lines, muted.Render(line))
 		}
 		return lines
