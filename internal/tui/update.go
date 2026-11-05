@@ -1,6 +1,9 @@
 package tui
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+)
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -14,8 +17,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = false
 	case tea.KeyPressMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "q":
+			if !m.textInputFocused() {
+				return m, tea.Quit
+			}
 		case "esc":
 			if m.screen == screenWorkflowEditor {
 				next, cmd := m.updateWorkflowEditor(msg)
@@ -27,10 +34,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.oauthWaiting {
+				return m.cancelOAuth(), m.hostInput.Focus()
+			}
 			return m, tea.Quit
 		}
 	case connectionResultMsg:
 		return m.handleConnectionResult(msg)
+	case oauthStartedMsg:
+		return m.handleOAuthStarted(msg)
+	case oauthFinishedMsg:
+		return m.handleOAuthFinished(msg)
 	case workflowsLoadedMsg:
 		return m.handleWorkflowsLoaded(msg)
 	case workflowLoadedMsg:
@@ -62,7 +76,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.connecting || m.loadingWorkflows {
+	if m.connecting || m.loadingWorkflows || m.oauthWaiting {
+		if _, ok := msg.(spinner.TickMsg); ok {
+			m.threadFrame++
+		}
+
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if cmd != nil {
@@ -71,4 +89,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m model) textInputFocused() bool {
+	return m.hostInput.Focused() || m.apiKeyInput.Focused() || m.composerInput.Focused() || m.aiPromptInput.Focused()
 }

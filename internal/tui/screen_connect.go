@@ -6,13 +6,21 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/zalando/go-keyring"
+)
+
+const (
+	connectFullHeight  = 30
+	connectRoomyHeight = 20
+	connectFieldHeight = 3
 )
 
 func (m model) updateConnect(msg tea.Msg) (model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if msg.Code == tea.KeyEnter && !m.connecting {
+		if msg.Code == tea.KeyEnter && !m.connecting && !m.oauthWaiting {
+			if m.browserButtonFocused {
+				return m.startOAuth()
+			}
 			return m.startConnection()
 		}
 		if msg.String() == "tab" || msg.String() == "shift+tab" || msg.String() == "up" || msg.String() == "down" {
@@ -39,7 +47,7 @@ func (m model) View() tea.View {
 	if m.width < minWidth || m.height < minHeight {
 		body := lipgloss.NewStyle().
 			Foreground(mutedTextColor).
-			Render("Increase terminal size to use Heddle.")
+			Render("Increase terminal size to use Treadle.")
 		frame := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 		return baseView(frame)
 	}
@@ -59,8 +67,7 @@ func (m model) handleConnectionResult(msg connectionResultMsg) (tea.Model, tea.C
 
 	if msg.err != nil {
 		m.connected = false
-		m.connectError = msg.err.Error()
-		m.connectStatus = "Error: " + truncatePlain(msg.err.Error(), 48)
+		m.connectError = describeDialError(m.hostInput.Value(), msg.err)
 		return m, m.hostInput.Focus()
 	}
 
@@ -68,11 +75,7 @@ func (m model) handleConnectionResult(msg connectionResultMsg) (tea.Model, tea.C
 	m.activeHost = msg.host
 	m.activeAPIKey = msg.apiKey
 
-	_ = keyring.Set("treadle", "host", msg.host)
-	_ = keyring.Set("treadle", "api_key", msg.apiKey)
-
 	m.connectError = ""
-	m.connectStatus = "Connected."
 	m.screen = screenApp
 	m.loadingWorkflows = true
 	m.workflowsError = ""
@@ -86,39 +89,52 @@ func (m model) handleConnectionResult(msg connectionResultMsg) (tea.Model, tea.C
 
 func (m model) handleConnectClick(x, y int) (model, tea.Cmd) {
 	switch {
-	case inside(x, y, m.connectInputRect):
+	case inside(x, y, m.connectLayout.host):
 		m.connectButtonFocused = false
 		m.apiKeyInput.Blur()
-		cmd := m.hostInput.Focus()
-		return m, cmd
-	case inside(x, y, m.connectButtonRect):
-		if m.connecting {
+		return m, m.hostInput.Focus()
+	case inside(x, y, m.connectLayout.key):
+		m.connectButtonFocused = false
+		m.hostInput.Blur()
+		return m, m.apiKeyInput.Focus()
+	case inside(x, y, m.connectLayout.button):
+		if m.connecting || m.oauthWaiting {
 			return m, nil
 		}
 		return m.startConnection()
+	case inside(x, y, m.connectLayout.browser):
+		if m.connecting || m.oauthWaiting {
+			return m, nil
+		}
+		return m.startOAuth()
 	default:
 		return m, nil
 	}
 }
 
 func (m model) focusNextConnectControl(reverse bool) model {
+	const controls = 4
+
 	focusIndex := 0
 	switch {
 	case m.apiKeyInput.Focused():
 		focusIndex = 1
 	case m.connectButtonFocused:
 		focusIndex = 2
+	case m.browserButtonFocused:
+		focusIndex = 3
 	}
 
 	if reverse {
-		focusIndex = (focusIndex + 2) % 3
+		focusIndex = (focusIndex + controls - 1) % controls
 	} else {
-		focusIndex = (focusIndex + 1) % 3
+		focusIndex = (focusIndex + 1) % controls
 	}
 
 	m.hostInput.Blur()
 	m.apiKeyInput.Blur()
 	m.connectButtonFocused = false
+	m.browserButtonFocused = false
 
 	switch focusIndex {
 	case 0:
@@ -127,85 +143,159 @@ func (m model) focusNextConnectControl(reverse bool) model {
 		m.apiKeyInput.Focus()
 	case 2:
 		m.connectButtonFocused = true
+	case 3:
+		m.browserButtonFocused = true
 	}
 
 	return m
 }
 
-func (m model) renderConnectScreen() string {
-	cardWidth := m.connectCardRect.w
-	innerWidth := max(cardWidth-4, 1)
-	formWidth := min(connectInputWidth, max(innerWidth-4, 18))
+// connectLayout places the login form. Rendering and mouse handling both read
+// it, so what is drawn and what is clickable can't drift apart.
+type connectLayout struct {
+	compact   bool
+	lockup    brandLockup
+	lockupY   int
+	titleY    int
+	subtitleY int
+	host      rect
+	key       rect
+	button    rect
+	browser   rect
+	statusY   int
+}
 
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(textColor).
-		Render("Heddle")
-
-	subtitle := lipgloss.NewStyle().
-		Foreground(mutedTextColor).
-		Render("Connect to your Heddle server")
-
-	inputLine := renderInputBlock(m.hostInput.View(), formWidth, m.hostInput.Focused())
-	apiKeyLine := renderInputBlock(m.apiKeyInput.View(), formWidth, m.apiKeyInput.Focused())
-
-	buttonLabel := "Connect"
-	if m.connecting {
-		buttonLabel = m.spinner.View() + " Connect"
+func newConnectLayout(width, height int) connectLayout {
+	l := connectLayout{compact: height < connectFullHeight, lockup: fullLockup, subtitleY: -1}
+	titleGap, fieldGap, buttonHeight, statusGap := 1, 1, 3, 1
+	if l.compact {
+		l.lockup = smallLockup
+		titleGap, fieldGap, buttonHeight, statusGap = 0, 0, 1, 0
+		if height >= connectRoomyHeight {
+			fieldGap, statusGap = 1, 1
+		}
 	}
-	button := renderButton(buttonLabel, connectButtonWidth, m.connectButtonFocused)
 
-	statusText := m.connectStatus
-	statusStyle := lipgloss.NewStyle().Foreground(mutedTextColor)
+	formWidth := min(connectFormWidth, max(width-8, 1))
+	formX := max((width-formWidth)/2, 0)
+
+	y := l.lockup.rows() + titleGap
+	l.titleY = y
+	y++
+	if !l.compact {
+		l.subtitleY = y
+		y++
+	}
+	y++
+
+	l.host = rect{x: formX, y: y, w: formWidth, h: connectFieldHeight}
+	y += connectFieldHeight + fieldGap
+	l.key = rect{x: formX, y: y, w: formWidth, h: connectFieldHeight}
+	y += connectFieldHeight + 1
+	l.button = rect{x: formX, y: y, w: formWidth, h: buttonHeight}
+	y += buttonHeight
+	l.browser = rect{x: formX, y: y, w: formWidth, h: 1}
+	y += 1 + statusGap
+	l.statusY = y
+
+	return l.centered(max(height-footerHeight, 1))
+}
+
+// centered moves the form down so it sits in the middle of the body.
+func (l connectLayout) centered(bodyHeight int) connectLayout {
+	offset := max((bodyHeight-l.statusY-1)/2, 0)
+
+	l.lockupY += offset
+	l.titleY += offset
+	if l.subtitleY >= 0 {
+		l.subtitleY += offset
+	}
+	l.host.y += offset
+	l.key.y += offset
+	l.button.y += offset
+	l.browser.y += offset
+	l.statusY += offset
+	return l
+}
+
+func (m model) connectThreadState() threadState {
 	switch {
-	case m.connecting:
-		statusText = "Connecting..."
-		statusStyle = statusStyle.
-			Foreground(accentColor)
+	case m.connecting, m.oauthWaiting:
+		return threadConnecting
 	case m.connectError != "":
-		statusStyle = statusStyle.Foreground(errorColor)
-	case m.connected:
-		statusText = "Connected."
-		statusStyle = statusStyle.Foreground(successColor)
+		return threadFailed
+	default:
+		return threadIdle
 	}
-	status := statusStyle.Render(statusText)
+}
 
-	lines := []string{
-		"",
-		centeredLine(title, innerWidth),
-		"",
-		centeredLine(subtitle, innerWidth),
-		"",
+// describeDialError keeps the end of a dial error, the part that explains it.
+func describeDialError(host string, err error) string {
+	reason := err.Error()
+	if i := strings.LastIndex(reason, ": "); i >= 0 {
+		reason = reason[i+2:]
+	}
+	return "Can't reach " + strings.TrimSpace(host) + ": " + reason
+}
+
+func (m model) renderConnectStatus(width int) string {
+	style := lipgloss.NewStyle().Foreground(mutedTextColor)
+	switch {
+	case m.oauthNotice != "":
+		return style.Foreground(warmColor).Render(truncatePlain(m.oauthNotice, width))
+	case m.oauthWaiting:
+		return style.Foreground(accentColor).Render("Finish signing in in your browser. esc cancels.")
+	case m.connecting:
+		return style.Foreground(accentColor).Render("Reaching " + truncatePlain(m.hostInput.Value(), max(width-12, 8)) + "...")
+	case m.connectError != "":
+		return style.Foreground(errorColor).Render(truncatePlain(m.connectError, width))
+	case strings.TrimSpace(m.apiKeyInput.Value()) == "":
+		return style.Render("Paste an API key, or sign in with your browser.")
+	default:
+		return style.Render("Ready to connect.")
+	}
+}
+
+func (m model) renderConnectScreen() string {
+	l := m.connectLayout
+	rows := make([]string, max(m.height-footerHeight, 1))
+	put := func(y, x int, lines ...string) {
+		for i, line := range lines {
+			if y+i >= 0 && y+i < len(rows) {
+				rows[y+i] = strings.Repeat(" ", max(x, 0)) + line
+			}
+		}
+	}
+	center := func(y int, line string) {
+		put(y, (m.width-lipgloss.Width(line))/2, line)
 	}
 
-	leftPadding := (innerWidth - formWidth) / 2
-	if leftPadding < 0 {
-		leftPadding = 0
+	put(l.lockupY, (m.width-l.lockup.width())/2, l.lockup.render(m.connectThreadState(), m.threadFrame)...)
+
+	center(l.titleY, lipgloss.NewStyle().Bold(true).Foreground(textColor).Render("T R E A D L E"))
+	if !l.compact {
+		center(l.subtitleY, lipgloss.NewStyle().Foreground(mutedTextColor).Render("Connect to your Heddle server"))
 	}
-	padStr := strings.Repeat(" ", leftPadding)
 
-	for _, l := range strings.Split(inputLine, "\n") {
-		lines = append(lines, padStr+l)
+	put(l.host.y, l.host.x, renderField("HOST", m.hostInput.View(), l.host.w, m.hostInput.Focused())...)
+	put(l.key.y, l.key.x, renderField("API KEY", m.apiKeyInput.View(), l.key.w, m.apiKeyInput.Focused())...)
+
+	label := "Connect  ⏎"
+	if m.connecting {
+		label = m.spinner.View() + " Connecting"
 	}
-	lines = append(lines, "")
+	put(l.button.y, l.button.x, renderButton(label, l.button.w, m.connectButtonFocused, m.connecting, l.compact)...)
 
-	for _, l := range strings.Split(apiKeyLine, "\n") {
-		lines = append(lines, padStr+l)
+	browser := lipgloss.NewStyle().Foreground(mutedTextColor)
+	browserLabel := "Sign in with browser"
+	if m.browserButtonFocused {
+		browser = browser.Foreground(accentColor).Bold(true)
+		browserLabel = "› " + browserLabel + " ‹"
 	}
-	lines = append(lines, "")
+	center(l.browser.y, browser.Render(browserLabel))
 
-	for _, l := range strings.Split(button, "\n") {
-		lines = append(lines, centeredLine(l, innerWidth))
-	}
-	lines = append(lines,
-		"",
-		centeredLine(status, innerWidth),
-		"",
-	)
+	center(l.statusY, m.renderConnectStatus(l.host.w))
 
-	card := renderBox(lines, cardWidth, m.connectCardRect.h)
-	body := lipgloss.Place(m.width, m.height-footerHeight, lipgloss.Center, lipgloss.Center, card)
-	footer := renderFooter("tab switch  ⏎ connect  esc/q quit", m.footerRect.w)
-
-	return lipgloss.JoinVertical(lipgloss.Left, body, footer)
+	footer := renderHints("tab next  ⏎ connect  esc quit", m.footerRect.w)
+	return strings.Join(rows, "\n") + "\n" + footer
 }

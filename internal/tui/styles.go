@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -9,42 +10,40 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// The dark theme of the Heddle web app, from apps/heddle_ui/assets/css/app.css.
 var (
-	backgroundColor    = lipgloss.Color("#222222")
-	inputBackground    = lipgloss.Color("#333333")
-	panelBorder        = lipgloss.Color("#615fff")
-	shadowColor        = lipgloss.Color("#222222")
-	focusedBorderColor = lipgloss.Color("#615fff")
-	shadowEdgeColor    = lipgloss.Color("#222222")
-	textColor          = lipgloss.Color("#F3F4F6")
-	mutedTextColor     = lipgloss.Color("#9CA3AF")
-	accentColor        = lipgloss.Color("#60A5FA")
-	successColor       = lipgloss.Color("#34D399")
-	errorColor         = lipgloss.Color("#F87171")
+	backgroundColor    = lipgloss.Color("#23262b")
+	panelBorder        = lipgloss.Color("#4a4d54")
+	shadowColor        = lipgloss.Color("#23262b")
+	focusedBorderColor = lipgloss.Color("#e8907d")
+	shadowEdgeColor    = lipgloss.Color("#23262b")
+	textColor          = lipgloss.Color("#f3ebdc")
+	mutedTextColor     = lipgloss.Color("#aca391")
+	accentColor        = lipgloss.Color("#e8907d")
+	onAccentColor      = lipgloss.Color("#181a1e")
+	neutralColor       = lipgloss.Color("#33363c")
+	threadDimColor     = lipgloss.Color("#5a5c60")
+	canvasDotColor     = lipgloss.Color("#3a3d43")
+	warmColor          = lipgloss.Color("#e8b77d")
+	infoColor          = lipgloss.Color("#7db3bf")
+	successColor       = lipgloss.Color("#2fb5a5")
+	errorColor         = lipgloss.Color("#f0788a")
 )
 
 func textInputStyles() textinput.Styles {
 	styles := textinput.DefaultDarkStyles()
-	base := lipgloss.NewStyle().
-		Foreground(textColor).
-		Background(inputBackground)
-	muted := lipgloss.NewStyle().
-		Foreground(mutedTextColor).
-		Background(inputBackground)
+	text := lipgloss.NewStyle().Foreground(textColor)
+	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
 
-	styles.Focused.Text = base
-	styles.Focused.Prompt = base
+	styles.Focused.Text = text
+	styles.Focused.Prompt = text
 	styles.Focused.Placeholder = muted
 	styles.Focused.Suggestion = muted
 
-	blurredBase := lipgloss.NewStyle().
-		Foreground(mutedTextColor).
-		Background(inputBackground)
-
-	styles.Blurred.Text = blurredBase
-	styles.Blurred.Prompt = blurredBase
-	styles.Blurred.Placeholder = blurredBase
-	styles.Blurred.Suggestion = blurredBase
+	styles.Blurred.Text = text
+	styles.Blurred.Prompt = muted
+	styles.Blurred.Placeholder = muted
+	styles.Blurred.Suggestion = muted
 	styles.Cursor.Color = accentColor
 	styles.Cursor.Blink = true
 
@@ -69,29 +68,95 @@ func renderOptionalError(message string) string {
 	return lipgloss.NewStyle().Foreground(errorColor).Render("Error: " + truncatePlain(message, 72))
 }
 
-func renderFooter(text string, width int) string {
-	style := lipgloss.NewStyle().Foreground(mutedTextColor)
-	return padRightBlank(style.Render(truncatePlain(text, max(width, 1))), max(width, 1))
+// renderHints styles "key description" pairs separated by two spaces, keeping
+// only the ones that fit whole.
+func renderHints(text string, width int) string {
+	key := lipgloss.NewStyle().Foreground(textColor).Render
+	description := lipgloss.NewStyle().Foreground(mutedTextColor).Render
+
+	const margin, gap = "  ", "   "
+	row := margin
+	used := lipgloss.Width(margin)
+	for i, hint := range strings.Split(text, "  ") {
+		needed := lipgloss.Width(hint)
+		if i > 0 {
+			needed += lipgloss.Width(gap)
+		}
+		if used+needed > width {
+			break
+		}
+		if i > 0 {
+			row += gap
+		}
+		name, rest, found := strings.Cut(hint, " ")
+		row += key(name)
+		if found {
+			row += description(" " + rest)
+		}
+		used += needed
+	}
+	return padRightBlank(row, max(width, 1))
 }
 
-func renderButton(label string, width int, focused bool) string {
+// renderButton returns one row when compact. Otherwise half blocks soften the
+// top and bottom edges, making it three rows tall.
+func renderButton(label string, width int, focused, busy, compact bool) []string {
 	if width <= 0 {
-		return ""
+		return nil
 	}
 
-	label = truncatePlain(ansi.Strip(label), width)
-	style := lipgloss.NewStyle().
-		Foreground(focusedBorderColor).
-		Underline(true).
+	fill := accentColor
+	ink := onAccentColor
+	switch {
+	case busy:
+		fill = neutralColor
+		ink = textColor
+	case focused:
+		fill = textColor
+	}
+
+	face := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ink).
+		Background(fill).
 		Width(width).
-		Align(lipgloss.Center)
-	if focused {
-		style = style.
-			Foreground(textColor).
-			Background(focusedBorderColor)
+		Align(lipgloss.Center).
+		Render(truncatePlain(ansi.Strip(label), width))
+	if compact {
+		return []string{face}
 	}
 
-	return style.Render(label)
+	edge := lipgloss.NewStyle().Foreground(fill).Render
+	return []string{edge(strings.Repeat("▄", width)), face, edge(strings.Repeat("▀", width))}
+}
+
+// renderField returns the three rows of a form field: label, value and rule.
+func renderField(label, value string, width int, focused bool) []string {
+	labelStyle := lipgloss.NewStyle().Foreground(mutedTextColor)
+	rule := lipgloss.NewStyle().Foreground(panelBorder).Render(strings.Repeat("─", width))
+	if focused {
+		labelStyle = labelStyle.Foreground(accentColor).Bold(true)
+		rule = lipgloss.NewStyle().Foreground(accentColor).Render(strings.Repeat("━", width))
+	}
+	return []string{labelStyle.Render(label), value, rule}
+}
+
+// categoryColor stands in for the node colours the API sends, which are Tailwind
+// classes and mean nothing in a terminal.
+func categoryColor(category string) color.Color {
+	category = strings.ToLower(category)
+	switch {
+	case strings.Contains(category, "trigger"):
+		return accentColor
+	case strings.Contains(category, "flow"):
+		return warmColor
+	case strings.Contains(category, "data"):
+		return successColor
+	case strings.Contains(category, "code"), strings.Contains(category, "integration"):
+		return infoColor
+	default:
+		return mutedTextColor
+	}
 }
 
 func renderStatusValue(value string) string {
@@ -100,7 +165,7 @@ func renderStatusValue(value string) string {
 	case "active":
 		style = style.Foreground(successColor)
 	case "running":
-		style = style.Foreground(accentColor)
+		style = style.Foreground(infoColor)
 	case "failed":
 		style = style.Foreground(errorColor)
 	}
@@ -158,8 +223,6 @@ func renderInputBlock(val string, width int, focused bool) string {
 	}
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
 
-	bgStyle := lipgloss.NewStyle()
-
 	b := lipgloss.RoundedBorder()
 	innerWidth := width - 2
 	if innerWidth < 1 {
@@ -169,20 +232,18 @@ func renderInputBlock(val string, width int, focused bool) string {
 	top := borderStyle.Render(b.TopLeft + strings.Repeat(b.Top, innerWidth) + b.TopRight)
 	bottom := borderStyle.Render(b.BottomLeft + strings.Repeat(b.Bottom, innerWidth) + b.BottomRight)
 
-	leftPad := bgStyle.Render(" ")
 	availWidth := innerWidth - 1
 	if availWidth < 0 {
 		availWidth = 0
 	}
 
 	paddedVal := lipgloss.NewStyle().
-		Background(inputBackground).
 		Inline(true).
 		MaxWidth(availWidth).
 		Width(availWidth).
 		Render(val)
 
-	midLeft := borderStyle.Render(b.Left) + leftPad
+	midLeft := borderStyle.Render(b.Left) + " "
 	midRight := borderStyle.Render(b.Right)
 
 	middle := midLeft + paddedVal + midRight

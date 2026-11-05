@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 )
+
+// errUnauthorized means the server is reachable but refused the API key.
+var errUnauthorized = errors.New("unauthorized")
 
 type flowsResponse struct {
 	Data []apiFlow `json:"data"`
@@ -54,8 +58,10 @@ type apiPosition struct {
 }
 
 type apiConnection struct {
-	Source any `json:"source"`
-	Target any `json:"target"`
+	Source       any    `json:"source"`
+	SourceOutput string `json:"sourceOutput"`
+	Target       any    `json:"target"`
+	TargetInput  string `json:"targetInput"`
 }
 
 type apiSaveConnection struct {
@@ -74,8 +80,9 @@ type apiNodeDef struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Category    string `json:"category"`
-	Color       string `json:"color"`
 	Icon        string `json:"icon"`
+	Inputs      []any  `json:"inputs"`
+	Outputs     []any  `json:"outputs"`
 }
 
 func (m model) startConnection() (model, tea.Cmd) {
@@ -87,10 +94,10 @@ func (m model) startConnection() (model, tea.Cmd) {
 
 	apiKey := strings.TrimSpace(m.apiKeyInput.Value())
 
+	m.activeMethod = loginAPIKey
 	m.connecting = true
 	m.connected = false
 	m.connectError = ""
-	m.connectStatus = "Connecting..."
 	m.hostInput.Blur()
 	m.apiKeyInput.Blur()
 
@@ -193,6 +200,9 @@ func loadWorkflows(ctx context.Context, baseURL, apiKey string) ([]workflow, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errUnauthorized
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("workflows api returned %s", resp.Status)
 	}
@@ -303,7 +313,13 @@ func saveWorkflow(ctx context.Context, baseURL, apiKey string, workflowID int, r
 		return apiFlow{}, err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/api/v1/workflows/%d", baseURL, workflowID), strings.NewReader(string(body)))
+	// A workflow with no id only exists here, so the first save creates it.
+	method, target := http.MethodPost, baseURL+"/api/v1/workflows"
+	if workflowID != 0 {
+		method, target = http.MethodPatch, fmt.Sprintf("%s/api/v1/workflows/%d", baseURL, workflowID)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, method, target, strings.NewReader(string(body)))
 	if err != nil {
 		return apiFlow{}, err
 	}
@@ -335,16 +351,13 @@ func mapFlow(item apiFlow) workflow {
 	updatedAt := parseAPITime(item.UpdatedAt)
 	insertedAt := parseAPITime(item.InsertedAt)
 	return workflow{
-		id:      item.ID,
-		name:    fallbackString(item.Name, fmt.Sprintf("Flow %d", item.ID)),
-		status:  deriveWorkflowStatus(item),
-		lastRun: relativeTime(updatedAt),
-		nodes:   len(item.Nodes),
-		recentRuns: []string{
-			"Updated " + relativeTime(updatedAt),
-			"Created " + relativeTime(insertedAt),
-			fmt.Sprintf("%d connections", len(item.Connections)),
-		},
+		id:          item.ID,
+		name:        fallbackString(item.Name, fmt.Sprintf("Flow %d", item.ID)),
+		status:      deriveWorkflowStatus(item),
+		updated:     relativeTime(updatedAt),
+		created:     relativeTime(insertedAt),
+		nodes:       len(item.Nodes),
+		connections: len(item.Connections),
 	}
 }
 

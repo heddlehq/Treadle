@@ -1,12 +1,16 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+const workflowListTop = 3
 
 func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -38,6 +42,10 @@ func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 		case "n":
 			m.createWorkflow()
 			return m, nil
+		case "r":
+			return m.reloadWorkflows()
+		case "L":
+			return m.logOut()
 		}
 		if msg.Code == tea.KeyEnter {
 			return m.openSelectedWorkflow()
@@ -59,6 +67,9 @@ func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 
 func (m model) handleWorkflowsLoaded(msg workflowsLoadedMsg) (tea.Model, tea.Cmd) {
 	m.loadingWorkflows = false
+	if errors.Is(msg.err, errUnauthorized) {
+		return m.returnToConnect()
+	}
 	if msg.err != nil {
 		m.workflows = nil
 		m.availableNodes = nil
@@ -68,6 +79,8 @@ func (m model) handleWorkflowsLoaded(msg workflowsLoadedMsg) (tea.Model, tea.Cmd
 		m.appendActivity("Failed to load workflows: " + truncatePlain(msg.err.Error(), 56))
 		return m, nil
 	}
+
+	m.rememberLogin()
 
 	m.workflowsError = ""
 	m.workflows = msg.workflows
@@ -85,139 +98,280 @@ func (m model) handleWorkflowsLoaded(msg workflowsLoadedMsg) (tea.Model, tea.Cmd
 	return m, nil
 }
 
-func (m model) renderAppScreen() string {
-	bodyHeight := max(m.height-composerHeight-footerHeight-sectionGapSize, 1)
-	sidebar := renderSectionPanel("Heddle", m.renderSidebarLines(), m.sidebarRect.w, bodyHeight)
-	main := renderSectionPanel("Heddle", m.renderMainLines(), m.mainRect.w, bodyHeight)
-	command := m.renderCommandBar()
-	footer := renderFooter("↑↓ workflows  ⏎ open  n new  / command  esc unfocus  q quit", m.footerRect.w)
+// rememberLogin runs once the server has accepted the credentials, so a bad key
+// never replaces a good one.
+func (m *model) rememberLogin() {
+	session := savedSession{Host: m.activeHost, Token: m.activeAPIKey, Method: m.activeMethod}
+	if session == m.savedSession {
+		return
+	}
+	if err := saveSession(session); err != nil {
+		m.commandOutput = []string{"Couldn't save your login: " + err.Error()}
+		return
+	}
+	m.savedSession = session
+}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, blank(sectionGapSize), main)
-	ui := lipgloss.JoinVertical(lipgloss.Left, body, blank(m.width), command, footer)
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, ui)
+func (m model) logOut() (model, tea.Cmd) {
+	clearSession()
+	m.savedSession = savedSession{}
+	m.screen = screenConnect
+	m.connected = false
+	m.connectError = ""
+	m.activeAPIKey = ""
+	m.workflows = nil
+	m.workflowsError = ""
+	m.apiKeyInput.SetValue("")
+	m.composerInput.Blur()
+	return m, m.apiKeyInput.Focus()
+}
+
+func (m model) returnToConnect() (tea.Model, tea.Cmd) {
+	// A saved login the server now refuses would only fail again on the next start.
+	if m.activeAPIKey == m.savedSession.Token {
+		clearSession()
+		m.savedSession = savedSession{}
+	}
+
+	m.screen = screenConnect
+	m.connected = false
+	switch {
+	case m.activeMethod == loginOAuth:
+		m.connectError = "Your sign-in expired. Sign in again."
+	case strings.TrimSpace(m.apiKeyInput.Value()) == "":
+		m.connectError = "This server needs an API key."
+	default:
+		m.connectError = "The server rejected this API key."
+	}
+	m.activeAPIKey = ""
+	m.composerInput.Blur()
+	m.hostInput.Blur()
+	return m, m.apiKeyInput.Focus()
+}
+
+func (m model) reloadWorkflows() (model, tea.Cmd) {
+	if m.loadingWorkflows {
+		return m, nil
+	}
+	m.loadingWorkflows = true
+	m.workflowsError = ""
+	return m, tea.Batch(m.spinner.Tick, loadWorkflowsCmd(m.activeHost, m.activeAPIKey))
+}
+
+func (m model) renderAppScreen() string {
+	sidebar := m.renderSidebarLines()
+	main := m.renderMainLines()
+	separator := lipgloss.NewStyle().Foreground(panelBorder).Render("│")
+
+	rows := m.renderAppHeader()
+	for i := range m.sidebarRect.h {
+		rows = append(rows, padRightBlank(sidebar[i], m.sidebarRect.w)+separator+main[i])
+	}
+	rows = append(rows, m.renderCommandBar()...)
+
+	hints := "↑↓ select  ⏎ open  n new  r reload  / command  L log out  q quit"
+	if m.composerInput.Focused() {
+		hints = "⏎ run  esc cancel"
+	}
+	rows = append(rows, renderHints(hints, m.footerRect.w))
+
+	return strings.Join(rows, "\n")
+}
+
+func (m model) renderAppHeader() []string {
+	dotColor := successColor
+	if m.workflowsError != "" {
+		dotColor = errorColor
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(m.activeHost, "http://"), "https://")
+	status := lipgloss.NewStyle().Foreground(dotColor).Render("●") +
+		lipgloss.NewStyle().Foreground(mutedTextColor).Render(" "+truncatePlain(host, max(m.width/2, 8)))
+
+	left := "  " + renderBrandTitle()
+	right := status + "  "
+	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
+
+	return []string{
+		left + blank(gap) + right,
+		lipgloss.NewStyle().Foreground(panelBorder).Render(m.ruleWithJunction(m.sidebarRect.w, "─", "┬")),
+	}
+}
+
+// ruleWithJunction draws a full-width rule that meets a vertical separator.
+func (m model) ruleWithJunction(column int, rule, junction string) string {
+	left := min(column, max(m.width-1, 0))
+	return strings.Repeat(rule, left) + junction + strings.Repeat(rule, max(m.width-left-1, 0))
+}
+
+func statusColor(status string) color.Color {
+	switch strings.ToLower(status) {
+	case "active":
+		return successColor
+	case "running":
+		return infoColor
+	case "failed":
+		return errorColor
+	default:
+		return mutedTextColor
+	}
+}
+
+// renderListRow draws one sidebar row. Selection fills the whole row, with the
+// weft colour as its edge.
+func renderListRow(marker string, markerColor color.Color, label string, width int, selected bool) string {
+	label = truncatePlain(label, max(width-5, 1))
+
+	style := lipgloss.NewStyle()
+	edge := "  "
+	if selected {
+		style = style.Background(neutralColor)
+		edge = style.Foreground(accentColor).Render("▌ ")
+	}
+
+	row := edge + style.Foreground(markerColor).Render(marker) + style.Render(" ")
+	if selected {
+		row += style.Bold(true).Foreground(textColor).Render(label)
+		return row + style.Render(strings.Repeat(" ", max(width-4-lipgloss.Width(label), 0)))
+	}
+	return row + style.Foreground(textColor).Render(label)
 }
 
 func (m model) renderSidebarLines() []string {
-	contentHeight := max(m.sidebarRect.h-3, 1)
-	lines := []string{
-		"",
-		lipgloss.NewStyle().Foreground(mutedTextColor).Render("Navigation"),
-		lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("› Workflows"),
-		"",
-		lipgloss.NewStyle().Foreground(mutedTextColor).Render("Workflows"),
+	width := m.sidebarRect.w
+	title := lipgloss.NewStyle().Foreground(mutedTextColor).Bold(true).Render("WORKFLOWS")
+	if count := len(m.workflows); count > 0 {
+		title += lipgloss.NewStyle().Foreground(mutedTextColor).Render(fmt.Sprintf("  %d", count))
 	}
+	lines := []string{"", "  " + title, ""}
 
-	visibleHeight := max(contentHeight-4, 1)
+	visibleHeight := m.workflowListRect.h
 	offset := clampScroll(m.workflowScroll, len(m.workflows)+1, visibleHeight)
-
-	for row := 0; row < visibleHeight; row++ {
+	for row := range visibleHeight {
 		index := offset + row
+		selected := index == m.selectedWorkflow
 		switch {
 		case index < len(m.workflows):
 			wf := m.workflows[index]
-			prefix := "  "
-			style := lipgloss.NewStyle().Foreground(textColor)
-			if index == m.selectedWorkflow {
-				prefix = "› "
-				style = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
-			}
-			lines = append(lines, style.Render(truncatePlain(prefix+wf.name, max(m.sidebarRect.w-6, 8))))
+			lines = append(lines, renderListRow("●", statusColor(wf.status), wf.name, width, selected))
 		case index == len(m.workflows):
-			prefix := "  "
-			style := lipgloss.NewStyle().Foreground(successColor)
-			if index == m.selectedWorkflow {
-				prefix = "› "
-				style = style.Bold(true)
-			}
-			lines = append(lines, style.Render(prefix+"+ New workflow"))
+			lines = append(lines, renderListRow("+", accentColor, "New workflow", width, selected))
 		default:
 			lines = append(lines, "")
 		}
 	}
 
-	return fitLines(lines, max(m.sidebarRect.w-4, 1), contentHeight)
+	return lines[:m.sidebarRect.h]
 }
 
 func (m model) renderMainLines() []string {
-	lines := []string{
-		lipgloss.NewStyle().Foreground(mutedTextColor).Render("Connected to " + m.activeHost),
-		"",
-	}
-
-	if m.loadingWorkflows {
-		lines = append(lines,
-			lipgloss.NewStyle().Foreground(accentColor).Render(m.spinner.View()+" Loading workflows..."),
-			"",
-		)
-	}
-	if m.workflowsError != "" {
-		lines = append(lines, renderOptionalError(m.workflowsError), "")
-	}
-
-	wf, ok := m.selectedWorkflowItem()
-	if !ok {
-		lines = append(lines,
-			lipgloss.NewStyle().Bold(true).Foreground(textColor).Render("No workflow selected."),
-			lipgloss.NewStyle().Foreground(mutedTextColor).Render("Create a new workflow to get started."),
-		)
-	} else {
-		lines = append(lines,
-			lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(wf.name),
-			"",
-			lipgloss.NewStyle().Foreground(mutedTextColor).Render("Status"),
-			renderStatusValue(wf.status),
-			"",
-			lipgloss.NewStyle().Foreground(mutedTextColor).Render("Last run"),
-			lipgloss.NewStyle().Foreground(textColor).Render(wf.lastRun),
-			"",
-			lipgloss.NewStyle().Foreground(mutedTextColor).Render("Nodes"),
-			lipgloss.NewStyle().Foreground(textColor).Render(fmt.Sprintf("%d nodes", wf.nodes)),
-			"",
-			lipgloss.NewStyle().Foreground(mutedTextColor).Render("Recent runs"),
-		)
-		for _, run := range wf.recentRuns {
-			lines = append(lines, truncatePlain("• "+run, max(m.mainRect.w-6, 12)))
-		}
-	}
-
+	height := m.mainRect.h
+	helpHeight := 0
 	if len(m.commandOutput) > 0 {
-		lines = append(lines, "", lipgloss.NewStyle().Foreground(mutedTextColor).Render("Help"))
+		helpHeight = len(m.commandOutput) + 1
+	}
+
+	var lines []string
+	wf, selected := m.selectedWorkflowItem()
+	contentHeight := max(height-helpHeight, 1)
+	switch {
+	case m.loadingWorkflows:
+		lines = m.renderPaneMessage(contentHeight, false, m.spinner.View()+" Loading workflows", "")
+	case m.workflowsError != "":
+		detail := lipgloss.NewStyle().Foreground(errorColor).Render(truncatePlain(m.workflowsError, max(m.mainRect.w-6, 8)))
+		lines = m.renderPaneMessage(contentHeight, false, "Couldn't load workflows", detail, "r  try again")
+	case selected:
+		lines = m.renderWorkflowDetails(wf)
+	case len(m.workflows) == 0:
+		lines = m.renderPaneMessage(contentHeight, true, "No workflows yet", "", "n  create your first one")
+	default:
+		lines = m.renderPaneMessage(contentHeight, true, "Start a new workflow", "", "⏎  open the editor")
+	}
+
+	for len(lines) < contentHeight {
+		lines = append(lines, "")
+	}
+	lines = lines[:contentHeight]
+
+	if helpHeight > 0 {
+		lines = append(lines, "")
 		for _, line := range m.commandOutput {
-			lines = append(lines, truncatePlain(line, max(m.mainRect.w-6, 12)))
+			lines = append(lines, "  "+lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(line, max(m.mainRect.w-4, 8))))
 		}
 	}
-
-	return fitLines(lines, max(m.mainRect.w-4, 1), max(m.mainRect.h-3, 1))
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return lines[:height]
 }
 
-func (m model) renderCommandLines() []string {
-	return nil
+func (m model) renderWorkflowDetails(wf workflow) []string {
+	width := max(m.mainRect.w-4, 8)
+	muted := lipgloss.NewStyle().Foreground(mutedTextColor).Render
+	text := lipgloss.NewStyle().Foreground(textColor).Render
+
+	row := func(label, value string) string {
+		return "  " + muted(fmt.Sprintf("%-13s", label)) + value
+	}
+
+	return []string{
+		"",
+		"  " + lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(truncatePlain(wf.name, width)),
+		"  " + lipgloss.NewStyle().Foreground(statusColor(wf.status)).Render("● "+wf.status),
+		"",
+		row("Nodes", text(fmt.Sprintf("%d", wf.nodes))),
+		row("Connections", text(fmt.Sprintf("%d", wf.connections))),
+		row("Updated", text(wf.updated)),
+		row("Created", text(wf.created)),
+		"",
+		renderHints("⏎ open in the editor", width),
+	}
 }
 
-func (m model) renderCommandBar() string {
-	title := "Command"
+// renderPaneMessage centres a message in the main pane. The logo only appears
+// when it fits at full size: smaller versions lose the shape of the mark.
+func (m model) renderPaneMessage(height int, withMark bool, title, detail string, hints ...string) []string {
+	width := m.mainRect.w
+	center := func(line string) string {
+		return strings.Repeat(" ", max((width-lipgloss.Width(line))/2, 0)) + line
+	}
+
+	var block []string
+	if withMark && height >= len(treadleMark)/2+6 {
+		for _, row := range renderMark(treadleMark) {
+			block = append(block, center(row))
+		}
+		block = append(block, "")
+	}
+
+	block = append(block, center(lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(title)))
+	if detail != "" {
+		block = append(block, center(detail))
+	}
+	for _, hint := range hints {
+		name, description, _ := strings.Cut(hint, "  ")
+		line := lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(name) +
+			lipgloss.NewStyle().Foreground(mutedTextColor).Render("  "+description)
+		block = append(block, "", center(line))
+	}
+
+	lines := make([]string, max((height-len(block))/2, 0))
+	return append(lines, block...)
+}
+
+func (m model) renderCommandBar() []string {
+	ruleColor := panelBorder
+	rule := m.ruleWithJunction(m.sidebarRect.w, "─", "┴")
+	promptColor := mutedTextColor
 	if m.composerInput.Focused() {
-		title = "Command  focused"
+		ruleColor = accentColor
+		rule = m.ruleWithJunction(m.sidebarRect.w, "━", "┷")
+		promptColor = accentColor
 	}
 
-	width := m.commandRect.w
-	innerWidth := max(width-4, 1)
-	inputWidth := max(innerWidth, 8)
-	titleLine := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(title)
-	inputLine := renderInputBlock(m.composerInput.View(), inputWidth, m.composerInput.Focused())
-	lines := strings.Split(inputLine, "\n")
-
-	leftPadding := (width - inputWidth) / 2
-	if leftPadding < 0 {
-		leftPadding = 0
+	return []string{
+		lipgloss.NewStyle().Foreground(ruleColor).Render(rule),
+		"  " + lipgloss.NewStyle().Foreground(promptColor).Render("› ") + m.composerInput.View(),
 	}
-	padStr := strings.Repeat(" ", leftPadding)
-
-	for i, l := range lines {
-		lines[i] = padStr + l
-	}
-
-	return renderSectionPanel(titleLine, lines, width, m.commandRect.h)
 }
 
 func (m *model) moveWorkflow(delta int) {
@@ -322,7 +476,7 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	m.editorWorkflowName = fallbackString(msg.flow.Name, m.editorWorkflowName)
 	m.clearEditorDirty("All changes saved")
 	m.appendActivity("Saved workflow: " + m.editorWorkflowName)
-	return m, nil
+	return m, loadWorkflowsCmd(m.activeHost, m.activeAPIKey)
 }
 
 func (m model) selectedWorkflowItem() (workflow, bool) {

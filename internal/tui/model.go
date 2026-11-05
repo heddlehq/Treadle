@@ -1,33 +1,32 @@
 package tui
 
 import (
+	"context"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/zalando/go-keyring"
 )
 
 const (
-	defaultServer       = "localhost:4000"
-	connectTimeout      = 15 * time.Second
-	minWidth            = 72
-	minHeight           = 16
-	minSidebarWidth     = 28
-	maxSidebarWidth     = 36
-	composerHeight      = 5
-	footerHeight        = 1
-	sectionGapSize      = 1
-	panelPaddingX       = 2
-	panelPaddingTop     = 1
-	panelPaddingBottom  = 1
-	connectCardWidth    = 56
-	connectCardHeight   = 19
-	connectInputWidth   = 34
-	connectButtonWidth  = 14
-	defaultWorkflowName = "Untitled workflow"
+	defaultServer          = "localhost:4000"
+	connectTimeout         = 15 * time.Second
+	minWidth               = 72
+	minHeight              = 16
+	minSidebarWidth        = 28
+	maxSidebarWidth        = 36
+	composerHeight         = 2
+	appHeaderHeight        = 2
+	editorBottomRuleHeight = 1
+	footerHeight           = 1
+	sectionGapSize         = 1
+	panelPaddingX          = 2
+	panelPaddingTop        = 1
+	panelPaddingBottom     = 1
+	connectFormWidth       = 46
+	defaultWorkflowName    = "Untitled workflow"
 )
 
 type screen string
@@ -39,12 +38,13 @@ const (
 )
 
 type workflow struct {
-	id         int
-	name       string
-	status     string
-	lastRun    string
-	nodes      int
-	recentRuns []string
+	id          int
+	name        string
+	status      string
+	updated     string
+	created     string
+	nodes       int
+	connections int
 }
 
 type editorMode string
@@ -91,6 +91,12 @@ type editorNode struct {
 	w        int
 	h        int
 	controls []nodeControl
+
+	// Where the server had this node. Cells are coarser than pixels, so a node that
+	// wasn't moved goes back exactly where it came from.
+	loaded    bool
+	loadedAt  canvasPoint
+	loadedPos apiPosition
 }
 
 type nodeControl struct {
@@ -100,8 +106,10 @@ type nodeControl struct {
 }
 
 type editorConnection struct {
-	source string
-	target string
+	source       string
+	sourceOutput string
+	target       string
+	targetInput  string
 }
 
 type connectionResultMsg struct {
@@ -141,12 +149,18 @@ type model struct {
 	connecting           bool
 	connected            bool
 	connectButtonFocused bool
+	browserButtonFocused bool
+	oauthWaiting         bool
+	oauthCancel          context.CancelFunc
+	oauthNotice          string
 	loadingWorkflows     bool
+	threadFrame          int
 	terminalFocused      bool
 
 	activeHost     string
 	activeAPIKey   string
-	connectStatus  string
+	activeMethod   string
+	savedSession   savedSession
 	connectError   string
 	workflowsError string
 
@@ -166,9 +180,27 @@ type model struct {
 	editorStatusMessage string
 	selectedNode        int
 	draggingNode        int
-	dragOffsetX         int
-	dragOffsetY         int
+	dragAnchorX         int
+	dragAnchorY         int
+	dragOrigins         map[string]canvasPoint
+	extraSelection      map[string]bool
+	viewX               int
+	viewY               int
+	zoomIndex           int
+	panning             bool
+	panLastX            int
+	panLastY            int
+	marqueeActive       bool
+	marqueeAdditive     bool
+	marqueeStartX       int
+	marqueeStartY       int
+	marqueeX            int
+	marqueeY            int
 	connectSource       int
+	connectOutput       int
+	wireActive          bool
+	wireX               int
+	wireY               int
 	paletteIndex        int
 	editorMode          editorMode
 	editorOverlay       editorOverlay
@@ -183,11 +215,8 @@ type model struct {
 	modalDraft          []nodeControl
 	nodeRects           map[string]rect
 
-	connectCardRect    rect
-	connectInputRect   rect
-	connectButtonRect  rect
+	connectLayout      connectLayout
 	sidebarRect        rect
-	navRect            rect
 	workflowListRect   rect
 	mainRect           rect
 	commandRect        rect
@@ -208,28 +237,20 @@ func initialModel() model {
 	hostInput.SetWidth(0)
 	hostInput.CharLimit = len(defaultServer) + 64
 	hostInput.Placeholder = "localhost:4000"
-	hostInput.Prompt = "Host: "
+	hostInput.Prompt = ""
 	hostInput.SetVirtualCursor(true)
 	hostInput.SetStyles(textInputStyles())
 	hostInput.Focus()
-
-	if savedHost, err := keyring.Get("treadle", "host"); err == nil && savedHost != "" {
-		hostInput.SetValue(savedHost)
-	}
 
 	apiKeyInput := textinput.New()
 	apiKeyInput.SetWidth(0)
 	apiKeyInput.CharLimit = 128
 	apiKeyInput.Placeholder = "hd_live_..."
-	apiKeyInput.Prompt = "Key:  "
+	apiKeyInput.Prompt = ""
 	apiKeyInput.SetVirtualCursor(true)
 	apiKeyInput.SetStyles(textInputStyles())
 	apiKeyInput.EchoMode = textinput.EchoPassword
 	apiKeyInput.EchoCharacter = '•'
-
-	if savedKey, err := keyring.Get("treadle", "api_key"); err == nil && savedKey != "" {
-		apiKeyInput.SetValue(savedKey)
-	}
 
 	composerInput := textinput.New()
 	composerInput.SetWidth(0)
@@ -251,14 +272,25 @@ func initialModel() model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accentColor)
 
+	session, hasSession := loadSession()
+	if hasSession {
+		hostInput.SetValue(session.Host)
+		if session.Method != loginOAuth {
+			apiKeyInput.SetValue(session.Token)
+		}
+		hostInput.Blur()
+	}
+
 	return model{
+		savedSession:  session,
+		connecting:    hasSession,
+		activeMethod:  fallbackString(session.Method, loginAPIKey),
 		screen:        screenConnect,
 		hostInput:     hostInput,
 		apiKeyInput:   apiKeyInput,
 		composerInput: composerInput,
 		aiPromptInput: aiPromptInput,
 		spinner:       sp,
-		connectStatus: "Enter server host to continue.",
 		aiChatMessages: []string{
 			"Agent: Olá! Descreva o workflow que deseja construir.",
 			"You: Quero um workflow que processa CSV e salva no banco",
@@ -269,6 +301,7 @@ func initialModel() model {
 		},
 		terminalFocused:  true,
 		selectedNode:     -1,
+		zoomIndex:        defaultZoomIndex,
 		draggingNode:     -1,
 		connectSource:    -1,
 		editorMenuTarget: -1,
@@ -277,6 +310,10 @@ func initialModel() model {
 	}
 }
 
+// Init reconnects straight away when a login was saved.
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	if m.savedSession.Token == "" {
+		return textinput.Blink
+	}
+	return tea.Batch(textinput.Blink, m.spinner.Tick, connectCmd(m.savedSession.Host, m.savedSession.Token))
 }

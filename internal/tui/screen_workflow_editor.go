@@ -22,7 +22,8 @@ func (m *model) beginWorkflowEditor(name string) {
 	m.editorSaving = false
 	m.editorStatusMessage = ""
 	m.editorMode = editorModeNormal
-	m.selectedNode = 0
+	m.selectOnly(0)
+	m.viewX, m.viewY, m.zoomIndex = 0, 0, defaultZoomIndex
 	m.draggingNode = -1
 	m.connectSource = -1
 	m.paletteIndex = 0
@@ -54,7 +55,7 @@ func (m *model) beginWorkflowEditor(name string) {
 			controls: defaultControls("Output"),
 		},
 	}
-	m.editorConnections = []editorConnection{{source: "start", target: "output"}}
+	m.editorConnections = []editorConnection{{source: "start", sourceOutput: "exec", target: "output", targetInput: "exec"}}
 	m.rebuildNodeRects()
 }
 
@@ -72,9 +73,8 @@ func (m *model) beginWorkflowEditorFromAPI(flow apiFlow) {
 
 	m.editorNodes = editorNodes
 	m.editorConnections = editorConnections
-	m.selectedNode = 0
-	m.clampEditorNodes()
-	m.rebuildNodeRects()
+	m.selectOnly(0)
+	m.fitView()
 }
 
 func (m *model) markEditorDirty() {
@@ -91,72 +91,26 @@ func (m *model) clearEditorDirty(message string) {
 }
 
 func (m model) mapAPIFlowToEditor(flow apiFlow) ([]editorNode, []editorConnection) {
-	type rawNode struct {
-		node editorNode
-		x    float64
-		y    float64
-	}
-
-	rawNodes := make([]rawNode, 0, len(flow.Nodes))
-	minX, maxX := 0.0, 0.0
-	minY, maxY := 0.0, 0.0
+	editorNodes := make([]editorNode, 0, len(flow.Nodes))
 	for i, item := range flow.Nodes {
 		kind := m.normalizeNodeKind(item.Type)
 		label := fallbackString(item.Label, m.nodeTitleForKind(kind))
-		controls := m.controlsFromAPI(kind, label, item.Controls)
+		width, height := m.nodeSize(kind, label)
 		node := editorNode{
 			id:       apiRefString(item.ID),
 			kind:     kind,
 			label:    label,
-			w:        editorNodeWidth(label),
-			h:        3,
-			controls: controls,
+			x:        int(math.Round(item.Position.X / pixelsPerColumn)),
+			y:        int(math.Round(item.Position.Y / pixelsPerRow)),
+			w:        width,
+			h:        height,
+			controls: m.controlsFromAPI(kind, label, item.Controls),
 		}
+		node.loaded = true
+		node.loadedAt = canvasPoint{node.x, node.y}
+		node.loadedPos = item.Position
 		if node.id == "" {
 			node.id = fmt.Sprintf("node_%d", i+1)
-		}
-		rawNodes = append(rawNodes, rawNode{node: node, x: item.Position.X, y: item.Position.Y})
-		if i == 0 || item.Position.X < minX {
-			minX = item.Position.X
-		}
-		if i == 0 || item.Position.X > maxX {
-			maxX = item.Position.X
-		}
-		if i == 0 || item.Position.Y < minY {
-			minY = item.Position.Y
-		}
-		if i == 0 || item.Position.Y > maxY {
-			maxY = item.Position.Y
-		}
-	}
-
-	maxNodeWidth := 0
-	for _, item := range rawNodes {
-		if item.node.w > maxNodeWidth {
-			maxNodeWidth = item.node.w
-		}
-	}
-	availableX := max(m.canvasRect.w-4-maxNodeWidth, 0)
-	availableY := max(m.canvasRect.h-3-3, 0)
-	spanX := maxX - minX
-	spanY := maxY - minY
-	scaleX := 1.0
-	scaleY := 1.0
-	if spanX > 0 && float64(availableX) < spanX {
-		scaleX = float64(availableX) / spanX
-	}
-	if spanY > 0 && float64(availableY) < spanY {
-		scaleY = float64(availableY) / spanY
-	}
-
-	editorNodes := make([]editorNode, 0, len(rawNodes))
-	for _, item := range rawNodes {
-		node := item.node
-		if spanX > 0 {
-			node.x = int(math.Round((item.x - minX) * scaleX))
-		}
-		if spanY > 0 {
-			node.y = int(math.Round((item.y - minY) * scaleY))
 		}
 		editorNodes = append(editorNodes, node)
 	}
@@ -168,7 +122,12 @@ func (m model) mapAPIFlowToEditor(flow apiFlow) ([]editorNode, []editorConnectio
 		if source == "" || target == "" {
 			continue
 		}
-		editorConnections = append(editorConnections, editorConnection{source: source, target: target})
+		editorConnections = append(editorConnections, editorConnection{
+			source:       source,
+			sourceOutput: conn.SourceOutput,
+			target:       target,
+			targetInput:  conn.TargetInput,
+		})
 	}
 
 	return editorNodes, editorConnections
@@ -178,15 +137,11 @@ func (m *model) saveCurrentWorkflow() tea.Cmd {
 	if m.editorSaving {
 		return nil
 	}
-	if m.editorWorkflowID == 0 {
-		m.editorStatusMessage = "Save unavailable for unsynced workflow"
-		return nil
-	}
 	if strings.TrimSpace(m.activeHost) == "" {
 		m.editorStatusMessage = "Missing server connection"
 		return nil
 	}
-	if !m.editorDirty {
+	if m.editorWorkflowID != 0 && !m.editorDirty {
 		m.editorStatusMessage = "All changes saved"
 		return nil
 	}
@@ -201,20 +156,21 @@ func (m model) workflowRequestPayload() workflowRequest {
 	for _, node := range m.editorNodes {
 		nodes = append(nodes, apiNode{
 			ID:       node.id,
-			Type:     slugifyNodeToken(node.kind),
+			Type:     m.nodeTypeName(node.kind),
 			Label:    node.label,
-			Position: apiPosition{X: float64(node.x), Y: float64(node.y)},
+			Position: node.savedPosition(),
 			Controls: node.controlsMap(),
 		})
 	}
 
 	connections := make([]apiSaveConnection, 0, len(m.editorConnections))
 	for _, conn := range m.editorConnections {
+		output, input := m.savedPorts(conn)
 		connections = append(connections, apiSaveConnection{
 			Source:       conn.source,
-			SourceOutput: "output",
+			SourceOutput: output,
 			Target:       conn.target,
-			TargetInput:  "input",
+			TargetInput:  input,
 		})
 	}
 
@@ -235,14 +191,26 @@ func (m model) updateWorkflowEditor(msg tea.Msg) (model, tea.Cmd) {
 		mouse := msg.Mouse()
 		switch mouse.Button {
 		case tea.MouseLeft:
-			return m.handleWorkflowEditorClick(mouse.X, mouse.Y)
+			return m.handleWorkflowEditorClick(mouse)
+		case tea.MouseMiddle:
+			m.panning = true
+			m.panLastX, m.panLastY = mouse.X, mouse.Y
 		case tea.MouseRight:
 			m.openWorkflowContextMenu(mouse.X, mouse.Y)
 		}
 	case tea.MouseMotionMsg:
 		m.handleWorkflowEditorMotion(msg.Mouse())
 	case tea.MouseReleaseMsg:
+		mouse := msg.Mouse()
 		m.draggingNode = -1
+		m.panning = false
+		if m.wireActive {
+			m.finishWire(mouse.X, mouse.Y)
+		}
+		if m.marqueeActive {
+			m.marqueeX, m.marqueeY = mouse.X, mouse.Y
+			m.finishMarquee()
+		}
 	case tea.MouseWheelMsg:
 		m.handleWorkflowEditorWheel(msg.Mouse())
 		return m, nil
@@ -264,8 +232,7 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		if m.editorMode == editorModeAdd || m.editorMode == editorModeConnect {
-			m.editorMode = editorModeNormal
-			m.connectSource = -1
+			m.cancelConnection()
 			return m, nil
 		}
 		m.screen = screenApp
@@ -275,6 +242,21 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		return m, nil
 	case "ctrl+s":
 		return m, m.saveCurrentWorkflow()
+	case "ctrl+a":
+		m.selectAllNodes()
+		return m, nil
+	case "+", "=":
+		m.zoomCentered(m.zoomIndex + 1)
+		return m, nil
+	case "-":
+		m.zoomCentered(m.zoomIndex - 1)
+		return m, nil
+	case "0":
+		m.zoomCentered(defaultZoomIndex)
+		return m, nil
+	case "f":
+		m.fitView()
+		return m, nil
 	case "tab":
 		m.selectNextNode(1)
 	case "shift+tab":
@@ -316,9 +298,10 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	case "a":
 		m.editorMode = editorModeAdd
 	case "c":
-		if m.hasSelectedEditorNode() {
-			m.editorMode = editorModeConnect
-			m.connectSource = m.selectedNode
+		if m.editorMode == editorModeConnect {
+			m.cycleConnectOutput()
+		} else {
+			m.beginConnectionFromSelected()
 		}
 	case "backspace", "delete":
 		m.deleteSelectedEditorNode()
@@ -335,56 +318,115 @@ func (m model) renderWorkflowEditor() string {
 		return m.renderWorkflowCommandPalette()
 	}
 
-	topbar := m.renderWorkflowTopBar()
-	palette := renderSectionPanel("NODES", m.renderPaletteLines(), m.paletteRect.w, m.paletteRect.h)
-	canvas := renderSectionPanel(
-		m.editorWorkflowName,
-		m.renderCanvasLines(),
-		m.canvasRect.w,
-		m.canvasRect.h,
+	palette := m.renderPalettePane()
+	canvas := m.renderCanvasPane()
+	separator := lipgloss.NewStyle().Foreground(panelBorder).Render("│")
+	rule := lipgloss.NewStyle().Foreground(panelBorder).Render
+
+	rows := m.renderWorkflowTopBar()
+	for i := range m.paletteRect.h {
+		rows = append(rows, padRightBlank(palette[i], m.paletteRect.w)+separator+canvas[i])
+	}
+	rows = append(rows,
+		rule(m.ruleWithJunction(m.paletteRect.w, "─", "┴")),
+		renderHints(m.workflowFooterText(), m.footerRect.w),
 	)
-	body := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		palette,
-		blank(sectionGapSize),
-		canvas,
-	)
-	footer := renderFooter(m.workflowFooterText(), m.footerRect.w)
-	ui := lipgloss.JoinVertical(lipgloss.Left, topbar, body, footer)
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, ui)
+	return strings.Join(rows, "\n")
 }
 
-func (m model) renderWorkflowTopBar() string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render("Heddle")
-	name := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(m.editorWorkflowName)
-	saveLabel := "Save"
-	saveStyle := lipgloss.NewStyle().Foreground(successColor).Bold(true)
-	if m.editorSaving {
-		saveLabel = "Saving..."
-		saveStyle = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
-	} else if m.editorDirty {
-		saveStyle = lipgloss.NewStyle().Foreground(successColor).Bold(true)
-	} else {
-		saveStyle = lipgloss.NewStyle().Foreground(mutedTextColor).Bold(true)
+// renderPalettePane keeps the first node row two rows down, where
+// paletteNodeKindAtRow expects it.
+func (m model) renderPalettePane() []string {
+	title := lipgloss.NewStyle().Foreground(mutedTextColor).Bold(true).Render("NODES")
+	lines := append([]string{"", "  " + title}, m.renderPaletteLines()...)
+	for len(lines) < m.paletteRect.h {
+		lines = append(lines, "")
 	}
-	save := saveStyle.Render("Save")
-	if m.editorSaving {
-		save = saveStyle.Render(saveLabel)
+	return lines[:m.paletteRect.h]
+}
+
+// renderCanvasPane keeps the canvas two columns and two rows in, the origin the
+// mouse and drag handling measure from.
+func (m model) renderCanvasPane() []string {
+	lines := []string{"", "  " + m.renderCanvasCaption()}
+	for _, line := range m.renderCanvasLines() {
+		lines = append(lines, "  "+line)
+	}
+	for len(lines) < m.canvasRect.h {
+		lines = append(lines, "")
+	}
+	return lines[:m.canvasRect.h]
+}
+
+func (m model) renderCanvasCaption() string {
+	width := max(m.canvasRect.w-4, 8)
+	if m.editorMode == editorModeConnect {
+		return lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(truncatePlain(m.connectCaption(), width))
 	}
 
-	left := "  " + title + "  │  " + name
+	caption := plural(len(m.editorNodes), "node") + "  ·  " + plural(len(m.editorConnections), "connection")
+	switch count := len(m.selectedIndices()); {
+	case count > 1:
+		caption = fmt.Sprintf("%d nodes selected. Drag to move them together, del removes them.", count)
+	case count == 1:
+		caption = "Drag ○ to a node to connect it, or click a node type to add it after this one."
+	}
+	caption += fmt.Sprintf("  ·  %d%%", scaled(100, m.zoom()))
+	return lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(caption, width))
+}
+
+func plural(count int, noun string) string {
+	if count == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}
+
+func (m model) renderWorkflowTopBar() []string {
+	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
+	name := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(truncatePlain(m.editorWorkflowName, max(m.width/3, 8)))
+	left := "  " + renderBrandTitle() + muted.Render("  │  ") + name
+
+	save := muted.Bold(true).Render("Save")
+	switch {
+	case m.editorSaving:
+		save = muted.Bold(true).Render("Saving...")
+	case m.editorDirty:
+		save = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("Save")
+	}
 	right := save + "  "
-	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
-	line := left + blank(gap) + right
-	divider := lipgloss.NewStyle().Foreground(panelBorder).Render(strings.Repeat("─", max(m.width, 1)))
-	return line + "\n" + divider + "\n" + blank(m.width)
-}
-func (m model) workflowFooterText() string {
-	base := "drag nodes  right-click menu  ctrl+shift+p palette  ctrl+s save  esc back"
-	if strings.TrimSpace(m.editorStatusMessage) == "" {
-		return base
+	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-6, 8)); status != "" {
+		right = status + "    " + right
 	}
-	return base + "  |  " + m.editorStatusMessage
+
+	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
+	return []string{
+		left + blank(gap) + right,
+		lipgloss.NewStyle().Foreground(panelBorder).Render(m.ruleWithJunction(m.paletteRect.w, "─", "┬")),
+	}
+}
+
+func (m model) renderEditorStatus(width int) string {
+	message := strings.TrimSpace(m.editorStatusMessage)
+	if message == "" {
+		return ""
+	}
+
+	statusColor := mutedTextColor
+	switch {
+	case strings.HasPrefix(message, "Unsaved"):
+		statusColor = warmColor
+	case strings.HasPrefix(message, "Save failed"), strings.HasPrefix(message, "Missing"), strings.HasPrefix(message, "Can't"):
+		statusColor = errorColor
+	}
+	return lipgloss.NewStyle().Foreground(statusColor).Render("● " + truncatePlain(message, width))
+}
+
+func (m model) workflowFooterText() string {
+	if m.editorMode == editorModeConnect {
+		return "tab next node  c next output  ⏎ connect  esc cancel"
+	}
+	return "c connect  del delete  +/- zoom  f fit  ctrl+a all  ctrl+s save  esc back"
 }
 
 func (m model) workflowSaveButtonRect() rect {
@@ -400,13 +442,14 @@ func (m model) renderCanvasLines() []string {
 	w := max(m.canvasRect.w-4, 1)
 	h := max(m.canvasRect.h-3, 1)
 	grid := newCanvasGrid(w, h)
+	drawCanvasDots(grid)
 
-	for _, conn := range m.editorConnections {
-		m.drawConnection(grid, conn)
-	}
+	m.drawConnections(grid)
+	m.drawPendingWire(grid)
 	for i, node := range m.editorNodes {
-		drawEditorNode(grid, node, i == m.selectedNode)
+		m.drawNode(grid, i, m.projectNode(node))
 	}
+	m.drawMarquee(grid)
 	if m.editorOverlay == editorOverlayContext {
 		m.drawContextMenu(grid)
 	}
@@ -429,86 +472,71 @@ func (m model) renderCanvasLines() []string {
 func (m model) getPaletteNodes() []apiNodeDef {
 	if len(m.availableNodes) == 0 {
 		return []apiNodeDef{
-			{Type: "Start", Title: "Start", Category: "FLOW CONTROL", Color: "#A5B4FC", Icon: "▷"},
-			{Type: "Condition", Title: "Condition", Category: "FLOW CONTROL", Color: "#F59E0B", Icon: "◇"},
-			{Type: "Output", Title: "Output", Category: "FLOW CONTROL", Color: "#A5B4FC", Icon: "◎"},
-			{Type: "Variable", Title: "Variable", Category: "DATA", Color: "#8B5CF6", Icon: "[x]"},
-			{Type: "Evaluate Code", Title: "Evaluate Code", Category: "CODE", Color: "#A5B4FC", Icon: "</>"},
+			{Type: "Start", Title: "Start", Category: "FLOW CONTROL", Icon: "play", Outputs: []any{"exec"}},
+			{Type: "Condition", Title: "Condition", Category: "FLOW CONTROL", Icon: "arrow", Inputs: []any{"exec"}, Outputs: []any{"true", "false"}},
+			{Type: "Output", Title: "Output", Category: "FLOW CONTROL", Icon: "check", Inputs: []any{"exec"}},
+			{Type: "Variable", Title: "Variable", Category: "DATA", Icon: "variable", Inputs: []any{"exec"}, Outputs: []any{"exec"}},
+			{Type: "Evaluate Code", Title: "Evaluate Code", Category: "CODE", Icon: "code", Inputs: []any{"exec"}, Outputs: []any{"exec"}},
 		}
 	}
 	return m.availableNodes
 }
 
-func (m model) renderPaletteLines() []string {
-	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
-	searchWidth := m.paletteSearchInputWidth()
-	searchContent := muted.Render(truncatePlain("Search nodes", max(searchWidth-3, 1)))
-	search := renderInputBlock(searchContent, searchWidth, false)
-	searchLines := strings.Split(search, "\n")
-
-	leftPadding := (max(m.paletteRect.w-4, 1) - searchWidth) / 2
-	if leftPadding < 0 {
-		leftPadding = 0
-	}
-	padStr := strings.Repeat(" ", leftPadding)
-	for i, l := range searchLines {
-		searchLines[i] = padStr + l
-	}
-
-	lines := searchLines
-	lines = append(lines, "")
-
-	nodes := m.getPaletteNodes()
-	currentCategory := ""
-	for _, def := range nodes {
-		cat := strings.ToUpper(def.Category)
-		if cat == "" {
-			cat = "OTHER"
+func (m model) nodeDefinition(kind string) (apiNodeDef, bool) {
+	for _, def := range m.getPaletteNodes() {
+		if slugifyNodeToken(def.Type) == slugifyNodeToken(kind) {
+			return def, true
 		}
-		if cat != currentCategory {
+	}
+	return apiNodeDef{}, false
+}
+
+// nodeTypeName is the name the server knows a node by, such as "Evaluate Code".
+func (m model) nodeTypeName(kind string) string {
+	if def, ok := m.nodeDefinition(kind); ok {
+		return def.Type
+	}
+	return kind
+}
+
+func paletteCategory(def apiNodeDef) string {
+	if def.Category == "" {
+		return "OTHER"
+	}
+	return strings.ToUpper(strings.ReplaceAll(def.Category, "_", " "))
+}
+
+func (m model) renderPaletteLines() []string {
+	heading := lipgloss.NewStyle().Foreground(mutedTextColor)
+	lines := []string{""}
+
+	currentCategory := ""
+	for i, def := range m.getPaletteNodes() {
+		if category := paletteCategory(def); category != currentCategory {
 			if currentCategory != "" {
 				lines = append(lines, "")
 			}
-			currentCategory = cat
-			lines = append(lines, muted.Bold(true).Render(currentCategory))
+			currentCategory = category
+			lines = append(lines, "  "+heading.Render(category))
 		}
 
-		color := def.Color
-		if color == "" {
-			color = "#A5B4FC"
-		}
-		icon := mapIconToTerminal(def.Icon)
-
-		item := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render(icon + "  " + def.Title)
-		lines = append(lines, item)
+		selected := m.editorMode == editorModeAdd && i == m.paletteIndex
+		lines = append(lines, renderListRow(mapIconToTerminal(def.Icon), categoryColor(def.Category), def.Title, m.paletteRect.w, selected))
 	}
 	return lines
 }
 
-func (m model) paletteSearchInputWidth() int {
-	return max(max(m.paletteRect.w-4, 1)-2, 1)
-}
-
+// paletteNodeRows mirrors renderPaletteLines, with the node type on each node row.
 func (m model) paletteNodeRows() []string {
-	rows := make([]string, 0, len(m.getPaletteNodes())+8)
-	searchRows := strings.Split(renderInputBlock("Search nodes", m.paletteSearchInputWidth(), false), "\n")
-	for range searchRows {
-		rows = append(rows, "")
-	}
-	rows = append(rows, "")
+	rows := []string{""}
 
-	nodes := m.getPaletteNodes()
 	currentCategory := ""
-	for _, def := range nodes {
-		cat := strings.ToUpper(def.Category)
-		if cat == "" {
-			cat = "OTHER"
-		}
-		if cat != currentCategory {
+	for _, def := range m.getPaletteNodes() {
+		if category := paletteCategory(def); category != currentCategory {
 			if currentCategory != "" {
 				rows = append(rows, "")
 			}
-			currentCategory = cat
+			currentCategory = category
 			rows = append(rows, "")
 		}
 		rows = append(rows, def.Type)
@@ -690,7 +718,8 @@ func (m model) renderWorkflowCommandPalette() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, palette)
 }
 
-func (m model) handleWorkflowEditorClick(x, y int) (model, tea.Cmd) {
+func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
+	x, y := mouse.X, mouse.Y
 	if m.editorOverlay != editorOverlayNone {
 		m.handleEditorOverlayClick(x, y)
 		return m, nil
@@ -741,28 +770,50 @@ func (m model) handleWorkflowEditorClick(x, y int) (model, tea.Cmd) {
 		return m, nil
 	}
 
-	for i, node := range m.editorNodes {
-		if inside(x, y, m.nodeRects[node.id]) {
-			wasSelected := m.selectedNode == i
-			m.selectedNode = i
-			if m.editorMode == editorModeConnect {
-				m.finishEditorConnection()
-				return m, nil
-			}
-			if wasSelected {
-				m.draggingNode = i
-			} else {
-				m.draggingNode = i
-			}
-			m.dragOffsetX = x - m.nodeRects[node.id].x
-			m.dragOffsetY = y - m.nodeRects[node.id].y
+	additive := mouse.Mod.Contains(tea.ModCtrl) || mouse.Mod.Contains(tea.ModShift)
+
+	if m.editorMode != editorModeConnect && !additive {
+		if node, output, ok := m.outputPortAt(x, y); ok {
+			m.selectOnly(node)
+			m.beginConnection(node, output)
+			m.wireActive = true
+			m.wireX, m.wireY = x, y
 			return m, nil
 		}
+	}
+
+	if i := m.nodeIndexAt(x, y); i >= 0 {
+		if m.editorMode == editorModeConnect {
+			m.selectOnly(i)
+			m.finishEditorConnection()
+			return m, nil
+		}
+		if additive {
+			m.toggleNodeSelection(i)
+			return m, nil
+		}
+		if !m.isNodeSelected(i) {
+			m.selectOnly(i)
+		}
+		m.beginNodeDrag(i, x, y)
+		return m, nil
+	}
+
+	if inside(x, y, m.canvasRect) {
+		m.cancelConnection()
+		if !additive {
+			m.clearSelection()
+		}
+		m.beginMarquee(x, y, additive)
 	}
 	return m, nil
 }
 
 func (m *model) handleWorkflowEditorWheel(mouse tea.Mouse) {
+	if inside(mouse.X, mouse.Y, m.canvasRect) {
+		m.handleCanvasWheel(mouse)
+		return
+	}
 	if !inside(mouse.X, mouse.Y, m.aiChatRect) {
 		return
 	}
@@ -973,7 +1024,8 @@ func (m *model) runEditorAction(item editorMenuItem) {
 	case editorActionCreate:
 		kind := fallbackString(item.kind, "Evaluate Code")
 		if m.editorCreateAtMenu {
-			m.addEditorNodeAt(kind, m.editorMenuX, m.editorMenuY)
+			x, y := m.toWorld(m.editorMenuX, m.editorMenuY)
+			m.addEditorNodeAt(kind, x, y)
 		} else {
 			m.addEditorNode(kind)
 		}
@@ -986,10 +1038,7 @@ func (m *model) runEditorAction(item editorMenuItem) {
 		m.openNodeModal()
 	case editorActionConnect:
 		m.closeEditorOverlay()
-		if m.hasSelectedEditorNode() {
-			m.editorMode = editorModeConnect
-			m.connectSource = m.selectedNode
-		}
+		m.beginConnectionFromSelected()
 	case editorActionBack:
 		m.closeEditorOverlay()
 		m.screen = screenApp
@@ -997,85 +1046,78 @@ func (m *model) runEditorAction(item editorMenuItem) {
 }
 
 func (m *model) handleWorkflowEditorMotion(mouse tea.Mouse) {
-	if m.draggingNode < 0 || m.draggingNode >= len(m.editorNodes) {
-		return
-	}
-	node := &m.editorNodes[m.draggingNode]
-	prevX, prevY := node.x, node.y
-	contentOriginX := m.canvasRect.x + 2
-	contentOriginY := m.canvasRect.y + 2
-	maxX := max(m.canvasRect.w-4-node.w, 0)
-	maxY := max(m.canvasRect.h-3-node.h, 0)
-	node.x = clamp(mouse.X-contentOriginX-m.dragOffsetX, 0, maxX)
-	node.y = clamp(mouse.Y-contentOriginY-m.dragOffsetY, 0, maxY)
-	m.rebuildNodeRects()
-	if node.x != prevX || node.y != prevY {
-		m.markEditorDirty()
+	switch {
+	case m.wireActive:
+		m.wireX, m.wireY = mouse.X, mouse.Y
+	case m.panning:
+		m.panBy(scaled(m.panLastX-mouse.X, 1/m.zoom()), scaled(m.panLastY-mouse.Y, 1/m.zoom()))
+		m.panLastX, m.panLastY = mouse.X, mouse.Y
+	case m.marqueeActive:
+		m.marqueeX, m.marqueeY = mouse.X, mouse.Y
+	case m.draggingNode >= 0 && m.draggingNode < len(m.editorNodes):
+		m.dragNodes(mouse.X, mouse.Y)
 	}
 }
 
+// moveSelectedEditorNode moves the selection, or scrolls when nothing is selected.
 func (m *model) moveSelectedEditorNode(dx, dy int) {
-	if !m.hasSelectedEditorNode() {
+	indices := m.selectedIndices()
+	if len(indices) == 0 {
+		m.panBy(dx*wheelColumns, dy*wheelRows)
 		return
 	}
-	node := &m.editorNodes[m.selectedNode]
-	prevX, prevY := node.x, node.y
-	node.x = clamp(node.x+dx, 0, max(m.canvasRect.w-4-node.w, 0))
-	node.y = clamp(node.y+dy, 0, max(m.canvasRect.h-3-node.h, 0))
-	m.rebuildNodeRects()
-	if node.x != prevX || node.y != prevY {
-		m.markEditorDirty()
+	for _, index := range indices {
+		m.editorNodes[index].x += dx
+		m.editorNodes[index].y += dy
 	}
-}
-
-func (m *model) addEditorNode(kind string) {
-	m.addEditorNodeAt(kind, max((m.canvasRect.w-4)/2-8, 0), max((m.canvasRect.h-3)/2-1, 0))
-}
-
-func (m *model) addEditorNodeAt(kind string, x, y int) {
-	id := fmt.Sprintf("node_%d", len(m.editorNodes)+1)
-	title := kind
-	nodes := m.getPaletteNodes()
-	for _, def := range nodes {
-		if def.Type == kind {
-			title = def.Title
-			break
-		}
-	}
-	node := editorNode{
-		id:       id,
-		kind:     kind,
-		label:    title,
-		w:        editorNodeWidth(title),
-		h:        3,
-		controls: defaultControls(kind),
-	}
-	node.x = clamp(x, 0, max(m.canvasRect.w-4-node.w, 0))
-	node.y = clamp(y, 0, max(m.canvasRect.h-3-node.h, 0))
-	m.editorNodes = append(m.editorNodes, node)
-	m.selectedNode = len(m.editorNodes) - 1
 	m.rebuildNodeRects()
 	m.markEditorDirty()
 }
 
-func (m *model) finishEditorConnection() {
-	if m.connectSource < 0 || m.connectSource >= len(m.editorNodes) || !m.hasSelectedEditorNode() || m.connectSource == m.selectedNode {
-		m.editorMode = editorModeNormal
-		m.connectSource = -1
+// addEditorNode continues from the selected node when there is one: the new node
+// goes after it, already connected.
+func (m *model) addEditorNode(kind string) {
+	width, height := m.nodeSize(kind, m.nodeTitleForKind(kind))
+	if !m.hasSelectedEditorNode() {
+		content := m.canvasContentRect()
+		x, y := m.toWorld(content.w/2-width/2, content.h/2-height/2)
+		m.addEditorNodeAt(kind, x, y)
 		return
 	}
-	source := m.editorNodes[m.connectSource].id
-	target := m.editorNodes[m.selectedNode].id
-	for _, conn := range m.editorConnections {
-		if conn.source == source && conn.target == target {
-			m.editorMode = editorModeNormal
-			m.connectSource = -1
-			return
-		}
+
+	source := m.editorNodes[m.selectedNode]
+	output := m.firstFreeOutput(source)
+	x, y := m.nextNodeSpot(source, width, height)
+	m.addEditorNodeAt(kind, x, y)
+	m.revealNode(m.selectedNode)
+
+	inputs := m.nodeInputs(kind)
+	if output < 0 || len(inputs) == 0 {
+		return
 	}
-	m.editorConnections = append(m.editorConnections, editorConnection{source: source, target: target})
-	m.editorMode = editorModeNormal
-	m.connectSource = -1
+	m.editorConnections = append(m.editorConnections, editorConnection{
+		source:       source.id,
+		sourceOutput: m.nodeOutputs(source.kind)[output],
+		target:       m.editorNodes[m.selectedNode].id,
+		targetInput:  inputs[0],
+	})
+}
+
+func (m *model) addEditorNodeAt(kind string, x, y int) {
+	title := m.nodeTitleForKind(kind)
+	width, height := m.nodeSize(kind, title)
+	node := editorNode{
+		id:       m.nextNodeID(),
+		kind:     kind,
+		label:    title,
+		w:        width,
+		h:        height,
+		controls: defaultControls(kind),
+	}
+	node.x, node.y = x, y
+	m.editorNodes = append(m.editorNodes, node)
+	m.selectOnly(len(m.editorNodes) - 1)
+	m.rebuildNodeRects()
 	m.markEditorDirty()
 }
 
@@ -1130,30 +1172,47 @@ func (m *model) saveNodeModal() {
 	m.modalDraft = nil
 }
 
+// deleteSelectedEditorNode removes the selection, except a Start node, which every
+// flow needs.
 func (m *model) deleteSelectedEditorNode() {
-	if !m.hasSelectedEditorNode() || isStartKind(m.editorNodes[m.selectedNode].kind) {
-		return
-	}
-	deletedID := m.editorNodes[m.selectedNode].id
-	m.editorNodes = append(m.editorNodes[:m.selectedNode], m.editorNodes[m.selectedNode+1:]...)
-	nextConnections := m.editorConnections[:0]
-	for _, conn := range m.editorConnections {
-		if conn.source != deletedID && conn.target != deletedID {
-			nextConnections = append(nextConnections, conn)
+	deleted := map[string]bool{}
+	for _, index := range m.selectedIndices() {
+		if node := m.editorNodes[index]; !isStartKind(node.kind) {
+			deleted[node.id] = true
 		}
 	}
-	m.editorConnections = nextConnections
-	m.selectedNode = clamp(m.selectedNode, 0, len(m.editorNodes)-1)
+	if len(deleted) == 0 {
+		return
+	}
+
+	nodes := m.editorNodes[:0]
+	for _, node := range m.editorNodes {
+		if !deleted[node.id] {
+			nodes = append(nodes, node)
+		}
+	}
+	m.editorNodes = nodes
+
+	connections := m.editorConnections[:0]
+	for _, conn := range m.editorConnections {
+		if !deleted[conn.source] && !deleted[conn.target] {
+			connections = append(connections, conn)
+		}
+	}
+	m.editorConnections = connections
+
+	m.clearSelection()
 	m.rebuildNodeRects()
 	m.markEditorDirty()
 }
 
 func (m *model) selectNextNode(delta int) {
 	if len(m.editorNodes) == 0 {
-		m.selectedNode = -1
+		m.clearSelection()
 		return
 	}
-	m.selectedNode = (m.selectedNode + delta + len(m.editorNodes)) % len(m.editorNodes)
+	m.selectOnly((m.selectedNode + delta + len(m.editorNodes)) % len(m.editorNodes))
+	m.revealNode(m.selectedNode)
 }
 
 func (m model) hasSelectedEditorNode() bool {
@@ -1167,14 +1226,6 @@ func (m model) selectedEditorNode() (editorNode, bool) {
 	return m.editorNodes[m.selectedNode], true
 }
 
-func (m *model) clampEditorNodes() {
-	for i := range m.editorNodes {
-		node := &m.editorNodes[i]
-		node.x = clamp(node.x, 0, max(m.canvasRect.w-4-node.w, 0))
-		node.y = clamp(node.y, 0, max(m.canvasRect.h-3-node.h, 0))
-	}
-}
-
 func (m *model) rebuildNodeRects() {
 	if m.nodeRects == nil {
 		m.nodeRects = map[string]rect{}
@@ -1182,13 +1233,10 @@ func (m *model) rebuildNodeRects() {
 	for key := range m.nodeRects {
 		delete(m.nodeRects, key)
 	}
+	content := m.canvasContentRect()
 	for _, node := range m.editorNodes {
-		m.nodeRects[node.id] = rect{
-			x: m.canvasRect.x + 2 + node.x,
-			y: m.canvasRect.y + 2 + node.y,
-			w: node.w,
-			h: node.h,
-		}
+		projected := m.projectNode(node)
+		m.nodeRects[node.id] = rect{x: content.x + projected.x, y: content.y + projected.y, w: projected.w, h: projected.h}
 	}
 }
 
@@ -1208,34 +1256,97 @@ func newCanvasGrid(w, h int) [][]canvasCell {
 	return grid
 }
 
-func drawEditorNode(grid [][]canvasCell, node editorNode, selected bool) {
+func drawCanvasDots(grid [][]canvasCell) {
+	style := lipgloss.NewStyle().Foreground(canvasDotColor)
+	for y := 0; y < len(grid); y += 2 {
+		for x := 0; x < len(grid[y]); x += 4 {
+			drawStyledRune(grid, x, y, '·', &style)
+		}
+	}
+}
+
+func (m model) drawNode(grid [][]canvasCell, index int, node editorNode) {
 	if node.w < 4 || node.h < 3 {
 		return
 	}
-	var borderStyle *lipgloss.Style
-	if selected {
-		style := lipgloss.NewStyle().Foreground(focusedBorderColor)
-		borderStyle = &style
+
+	def, _ := m.nodeDefinition(node.kind)
+	connecting := m.editorMode == editorModeConnect
+	highlighted := m.isNodeSelected(index)
+	if connecting {
+		highlighted = index == m.connectSource
 	}
 
-	leftTop, rightTop, leftBottom, rightBottom := '╭', '╮', '╰', '╯'
-	drawStyledRune(grid, node.x, node.y, leftTop, borderStyle)
-	drawStyledRune(grid, node.x+node.w-1, node.y, rightTop, borderStyle)
-	drawStyledRune(grid, node.x, node.y+node.h-1, leftBottom, borderStyle)
-	drawStyledRune(grid, node.x+node.w-1, node.y+node.h-1, rightBottom, borderStyle)
+	border := lipgloss.NewStyle().Foreground(panelBorder)
+	fill := lipgloss.NewStyle().Foreground(textColor)
+	switch {
+	case connecting && index == m.wireTarget():
+		border = border.Foreground(successColor)
+		fill = fill.Bold(true)
+	case highlighted:
+		border = border.Foreground(focusedBorderColor)
+		fill = fill.Bold(true)
+	}
+
+	drawStyledRune(grid, node.x, node.y, '╭', &border)
+	drawStyledRune(grid, node.x+node.w-1, node.y, '╮', &border)
+	drawStyledRune(grid, node.x, node.y+node.h-1, '╰', &border)
+	drawStyledRune(grid, node.x+node.w-1, node.y+node.h-1, '╯', &border)
 	for x := node.x + 1; x < node.x+node.w-1; x++ {
-		drawStyledRune(grid, x, node.y, '─', borderStyle)
-		drawStyledRune(grid, x, node.y+node.h-1, '─', borderStyle)
+		drawStyledRune(grid, x, node.y, '─', &border)
+		drawStyledRune(grid, x, node.y+node.h-1, '─', &border)
 	}
 	for y := node.y + 1; y < node.y+node.h-1; y++ {
-		drawStyledRune(grid, node.x, y, '│', borderStyle)
-		drawStyledRune(grid, node.x+node.w-1, y, '│', borderStyle)
+		drawStyledRune(grid, node.x, y, '│', &border)
+		drawStyledRune(grid, node.x+node.w-1, y, '│', &border)
+		for x := node.x + 1; x < node.x+node.w-1; x++ {
+			drawStyledRune(grid, x, y, ' ', &fill)
+		}
 	}
-	label := node.label
-	if selected {
-		label = "> " + label
+
+	iconStyle := fill.Foreground(categoryColor(def.Category))
+	for i, r := range []rune(mapIconToTerminal(def.Icon)) {
+		drawStyledRune(grid, node.x+2+i, node.y+1, r, &iconStyle)
 	}
-	drawText(grid, node.x+2, node.y+1, truncatePlain(label, node.w-4))
+	label := []rune(node.label)
+	if room := node.w - 6; len(label) > room {
+		label = []rune(truncatePlain(node.label, room))
+		if m.zoom() < 1 {
+			label = []rune(node.label)[:max(room, 0)]
+		}
+	}
+	for i, r := range label {
+		drawStyledRune(grid, node.x+4+i, node.y+1, r, &fill)
+	}
+
+	m.drawOutputPorts(grid, index, node)
+}
+
+// drawOutputPorts puts a handle on the right edge for each output: filled when
+// something is attached, hollow when it's free to connect.
+func (m model) drawOutputPorts(grid [][]canvasCell, index int, node editorNode) {
+	outputs := m.nodeOutputs(node.kind)
+	label := lipgloss.NewStyle().Foreground(mutedTextColor)
+
+	for i, output := range outputs {
+		y := outputRow(node, i, len(outputs))
+
+		port, glyph := lipgloss.NewStyle().Foreground(mutedTextColor), '○'
+		if m.outputConnected(node, output) {
+			port, glyph = port.Foreground(textColor), '●'
+		}
+		if m.editorMode == editorModeConnect && index == m.connectSource && i == m.connectOutput {
+			port, glyph = port.Foreground(accentColor), '●'
+		}
+		drawStyledRune(grid, node.x+node.w-1, y, glyph, &port)
+
+		if len(outputs) > 1 && m.zoom() >= 1 {
+			runes := []rune(output)
+			for j, r := range runes {
+				drawStyledRune(grid, node.x+node.w-2-len(runes)+j, y, r, &label)
+			}
+		}
+	}
 }
 
 func editorNodeWidth(label string) int {
@@ -1251,113 +1362,34 @@ func (m model) drawContextMenu(grid [][]canvasCell) {
 	x := m.editorMenuX
 	y := m.editorMenuY
 
-	drawRune(grid, x, y, '╭')
-	drawRune(grid, x+width-1, y, '╮')
-	drawRune(grid, x, y+height-1, '╰')
-	drawRune(grid, x+width-1, y+height-1, '╯')
+	border := lipgloss.NewStyle().Foreground(panelBorder)
+	fill := lipgloss.NewStyle().Background(neutralColor).Foreground(textColor)
+	active := fill.Foreground(accentColor).Bold(true)
+
+	drawStyledRune(grid, x, y, '╭', &border)
+	drawStyledRune(grid, x+width-1, y, '╮', &border)
+	drawStyledRune(grid, x, y+height-1, '╰', &border)
+	drawStyledRune(grid, x+width-1, y+height-1, '╯', &border)
 	for col := x + 1; col < x+width-1; col++ {
-		drawRune(grid, col, y, '─')
-		drawRune(grid, col, y+height-1, '─')
+		drawStyledRune(grid, col, y, '─', &border)
+		drawStyledRune(grid, col, y+height-1, '─', &border)
 	}
 	for row := y + 1; row < y+height-1; row++ {
-		drawRune(grid, x, row, '│')
-		drawRune(grid, x+width-1, row, '│')
+		drawStyledRune(grid, x, row, '│', &border)
+		drawStyledRune(grid, x+width-1, row, '│', &border)
 		for col := x + 1; col < x+width-1; col++ {
-			drawRune(grid, col, row, ' ')
+			drawStyledRune(grid, col, row, ' ', &fill)
 		}
 	}
 	for i, item := range items {
-		prefix := "  "
+		prefix, style := "  ", &fill
 		if i == m.editorMenuSelected {
-			prefix = "› "
+			prefix, style = "› ", &active
 		}
-		drawText(grid, x+2, y+1+i, truncatePlain(prefix+item.label, max(width-4, 1)))
-	}
-}
-
-func (m model) drawConnection(grid [][]canvasCell, conn editorConnection) {
-	source, okSource := m.editorNodeByID(conn.source)
-	target, okTarget := m.editorNodeByID(conn.target)
-	if !okSource || !okTarget {
-		return
-	}
-	x1 := source.x + source.w
-	y1 := source.y + source.h/2
-	x2 := target.x - 1
-	y2 := target.y + target.h/2
-	arrow := '▶'
-	if y1 == y2 && x1 <= x2 {
-		drawHorizontalLine(grid, x1, x2, y1)
-		drawRune(grid, x2, y2, arrow)
-		return
-	}
-	if x1 > x2 {
-		x1 = source.x + source.w/2
-		y1 = source.y + source.h
-		x2 = target.x + target.w/2
-		y2 = target.y - 1
-		arrow = '▼'
-		if target.y < source.y {
-			y1 = source.y - 1
-			y2 = target.y + target.h
-			arrow = '▲'
+		for j, r := range []rune(truncatePlain(prefix+item.label, max(width-4, 1))) {
+			drawStyledRune(grid, x+2+j, y+1+i, r, style)
 		}
 	}
-	midX := (x1 + x2) / 2
-	drawHorizontalLine(grid, x1, midX, y1)
-	drawVerticalLine(grid, midX, y1, y2)
-	drawHorizontalLine(grid, midX, x2, y2)
-	drawRune(grid, midX, y1, connectionCorner(horizontalDirection(x1, midX), verticalDirection(y1, y2)))
-	drawRune(grid, midX, y2, connectionCorner(-horizontalDirection(midX, x2), -verticalDirection(y1, y2)))
-	drawRune(grid, x2, y2, arrow)
-}
-
-func drawHorizontalLine(grid [][]canvasCell, x1, x2, y int) {
-	for x := min(x1, x2); x <= max(x1, x2); x++ {
-		drawRune(grid, x, y, '─')
-	}
-}
-
-func drawVerticalLine(grid [][]canvasCell, x, y1, y2 int) {
-	for y := min(y1, y2); y <= max(y1, y2); y++ {
-		drawRune(grid, x, y, '│')
-	}
-}
-
-func horizontalDirection(from, to int) int {
-	if to < from {
-		return -1
-	}
-	return 1
-}
-
-func verticalDirection(from, to int) int {
-	if to < from {
-		return -1
-	}
-	return 1
-}
-
-func connectionCorner(dx, dy int) rune {
-	switch {
-	case dx > 0 && dy > 0:
-		return '╮'
-	case dx > 0 && dy < 0:
-		return '╯'
-	case dx < 0 && dy > 0:
-		return '╭'
-	default:
-		return '╰'
-	}
-}
-
-func (m model) editorNodeByID(id string) (editorNode, bool) {
-	for _, node := range m.editorNodes {
-		if node.id == id {
-			return node, true
-		}
-	}
-	return editorNode{}, false
 }
 
 func drawRune(grid [][]canvasCell, x, y int, r rune) {
@@ -1375,6 +1407,13 @@ func drawText(grid [][]canvasCell, x, y int, text string) {
 	for i, r := range []rune(text) {
 		drawRune(grid, x+i, y, r)
 	}
+}
+
+func (n editorNode) savedPosition() apiPosition {
+	if n.loaded && n.loadedAt == (canvasPoint{n.x, n.y}) {
+		return n.loadedPos
+	}
+	return apiPosition{X: float64(n.x * pixelsPerColumn), Y: float64(n.y * pixelsPerRow)}
 }
 
 func (n editorNode) controlsMap() map[string]any {
