@@ -54,12 +54,6 @@ func (m *model) reflow() {
 	m.aiChatRect = rect{}
 	m.aiChatMessagesRect = rect{}
 	m.aiPromptInputRect = rect{}
-	m.modalRect = rect{
-		x: max((m.width-44)/2, 0),
-		y: max((m.height-18)/2, 0),
-		w: min(44, max(m.width-4, 24)),
-		h: min(18, max(m.height-4, 8)),
-	}
 
 	m.workflowListRect = rect{
 		x: m.sidebarRect.x,

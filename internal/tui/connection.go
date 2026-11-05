@@ -76,13 +76,14 @@ type nodesResponse struct {
 }
 
 type apiNodeDef struct {
-	Type        string `json:"type"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
-	Icon        string `json:"icon"`
-	Inputs      []any  `json:"inputs"`
-	Outputs     []any  `json:"outputs"`
+	Type        string       `json:"type"`
+	Title       string       `json:"title"`
+	Description string       `json:"description"`
+	Category    string       `json:"category"`
+	Icon        string       `json:"icon"`
+	Inputs      []any        `json:"inputs"`
+	Outputs     []any        `json:"outputs"`
+	UIFields    []apiUIField `json:"ui_fields"`
 }
 
 func (m model) startConnection() (model, tea.Cmd) {

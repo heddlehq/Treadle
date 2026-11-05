@@ -18,7 +18,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			return m, tea.Quit
+			// In the editor it copies, like everywhere else. With nothing to copy it
+			// still quits, so there's always a way out.
+			if !m.editorCanCopy() {
+				return m, tea.Quit
+			}
 		case "q":
 			if !m.textInputFocused() {
 				return m, tea.Quit
@@ -92,5 +96,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) textInputFocused() bool {
-	return m.hostInput.Focused() || m.apiKeyInput.Focused() || m.composerInput.Focused() || m.aiPromptInput.Focused()
+	return m.hostInput.Focused() || m.apiKeyInput.Focused() || m.composerInput.Focused() ||
+		m.aiPromptInput.Focused() || m.editorMode == editorModeModal
+}
+
+func (m model) editorCanCopy() bool {
+	return m.screen == screenWorkflowEditor && m.editorMode == editorModeNormal &&
+		m.editorOverlay == editorOverlayNone && m.canCopySelection()
 }

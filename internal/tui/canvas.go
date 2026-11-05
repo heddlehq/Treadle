@@ -190,6 +190,7 @@ func (m model) selectedIndices() []int {
 func (m *model) selectOnly(index int) {
 	m.selectedNode = index
 	m.extraSelection = nil
+	m.selectedConnection = -1
 }
 
 func (m *model) clearSelection() {
@@ -235,6 +236,7 @@ func (m *model) selectAllNodes() {
 
 func (m *model) beginNodeDrag(index, x, y int) {
 	m.draggingNode = index
+	m.dragMoved = false
 	m.dragAnchorX, m.dragAnchorY = x, y
 	m.dragOrigins = map[string]canvasPoint{}
 	for _, selected := range m.selectedIndices() {
@@ -249,15 +251,18 @@ func (m *model) dragNodes(x, y int) {
 
 	moved := false
 	for i := range m.editorNodes {
-		node := &m.editorNodes[i]
+		node := m.editorNodes[i]
 		origin, ok := m.dragOrigins[node.id]
-		if !ok {
+		if !ok || (node.x == origin.x+dx && node.y == origin.y+dy) {
 			continue
 		}
-		if node.x != origin.x+dx || node.y != origin.y+dy {
-			node.x, node.y = origin.x+dx, origin.y+dy
-			moved = true
+		// A whole drag is one step of undo.
+		if !m.dragMoved {
+			m.pushUndo()
+			m.dragMoved = true
 		}
+		m.editorNodes[i].x, m.editorNodes[i].y = origin.x+dx, origin.y+dy
+		moved = true
 	}
 	if moved {
 		m.rebuildNodeRects()

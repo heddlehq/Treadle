@@ -23,6 +23,7 @@ func (m *model) beginWorkflowEditor(name string) {
 	m.editorStatusMessage = ""
 	m.editorMode = editorModeNormal
 	m.selectOnly(0)
+	m.undoStack, m.redoStack, m.pasteCount = nil, nil, 0
 	m.viewX, m.viewY, m.zoomIndex = 0, 0, defaultZoomIndex
 	m.draggingNode = -1
 	m.connectSource = -1
@@ -214,13 +215,20 @@ func (m model) updateWorkflowEditor(msg tea.Msg) (model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		m.handleWorkflowEditorWheel(msg.Mouse())
 		return m, nil
+	default:
+		// Paste and the cursor blink.
+		if m.editorMode == editorModeModal {
+			var cmd tea.Cmd
+			m.modalInput, cmd = m.modalInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
 
 func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorMode == editorModeModal {
-		return m.updateNodeModalKey(msg), nil
+		return m.updateNodeModalKey(msg)
 	}
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
@@ -235,7 +243,24 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 			m.cancelConnection()
 			return m, nil
 		}
+		if m.hasSelectedConnection() || len(m.selectedIndices()) > 1 {
+			m.clearSelection()
+			return m, nil
+		}
 		m.screen = screenApp
+		return m, nil
+	case "ctrl+z":
+		m.undo()
+		return m, nil
+	case "ctrl+y", "ctrl+shift+z":
+		m.redo()
+		return m, nil
+	case "ctrl+c":
+		m.copySelection()
+		m.pasteCount = 0
+		return m, nil
+	case "ctrl+v":
+		m.pasteNearOriginal()
 		return m, nil
 	case "ctrl+p", "ctrl+shift+p":
 		m.openWorkflowCommandPalette()
@@ -304,7 +329,7 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 			m.beginConnectionFromSelected()
 		}
 	case "backspace", "delete":
-		m.deleteSelectedEditorNode()
+		m.deleteSelection()
 	}
 
 	return m, nil
@@ -366,6 +391,8 @@ func (m model) renderCanvasCaption() string {
 
 	caption := plural(len(m.editorNodes), "node") + "  ·  " + plural(len(m.editorConnections), "connection")
 	switch count := len(m.selectedIndices()); {
+	case m.hasSelectedConnection():
+		caption = m.selectedConnectionCaption()
 	case count > 1:
 		caption = fmt.Sprintf("%d nodes selected. Drag to move them together, del removes them.", count)
 	case count == 1:
@@ -426,7 +453,7 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	return "c connect  del delete  +/- zoom  f fit  ctrl+a all  ctrl+s save  esc back"
+	return "c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
 }
 
 func (m model) workflowSaveButtonRect() rect {
@@ -660,35 +687,6 @@ func (m model) renderInspectorLines() []string {
 	return lines
 }
 
-func (m model) renderNodeModal() string {
-	node, ok := m.selectedEditorNode()
-	if !ok {
-		return m.renderWorkflowEditor()
-	}
-
-	width := max(m.modalRect.w, 32)
-	lines := []string{
-		lipgloss.NewStyle().Foreground(mutedTextColor).Render("Type: " + node.kind),
-		"",
-	}
-	for i, control := range m.modalDraft {
-		style := lipgloss.NewStyle().Foreground(textColor)
-		prefix := "  "
-		if i == m.modalFocusedControl {
-			style = style.Foreground(accentColor).Bold(true)
-			prefix = "› "
-		}
-		lines = append(lines, style.Render(prefix+control.label))
-		lines = append(lines, "  "+control.value)
-		lines = append(lines, "")
-	}
-	lines = append(lines, lipgloss.NewStyle().Foreground(mutedTextColor).Render("tab field  type edit  enter save  esc cancel"))
-	lines = append(lines, "", "          Save        Cancel")
-
-	modal := renderSectionPanel("Edit node", lines, width, m.modalRect.h)
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
-}
-
 func (m model) renderWorkflowCommandPalette() string {
 	items := m.editorMenuItems()
 	title := "Command Palette"
@@ -701,18 +699,12 @@ func (m model) renderWorkflowCommandPalette() string {
 		lipgloss.NewStyle().Foreground(mutedTextColor).Render(subtitle),
 		"",
 	}
+	width := min(46, max(m.width-8, 28))
 	for i, item := range items {
-		prefix := "  "
-		style := lipgloss.NewStyle().Foreground(textColor)
-		if i == m.editorMenuSelected {
-			prefix = "› "
-			style = style.Foreground(accentColor).Bold(true)
-		}
-		lines = append(lines, style.Render(prefix+item.label))
+		lines = append(lines, renderListRow("›", accentColor, item.label, width-4, i == m.editorMenuSelected))
 	}
 	lines = append(lines, "", lipgloss.NewStyle().Foreground(mutedTextColor).Render("↑↓ select  enter run  esc close"))
 
-	width := min(46, max(m.width-8, 28))
 	height := min(max(len(lines)+3, 10), max(m.height-4, 8))
 	palette := renderSectionPanel(title, lines, width, height)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, palette)
@@ -730,26 +722,7 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 	}
 
 	if m.editorMode == editorModeModal {
-		if !inside(x, y, m.modalRect) {
-			return m, nil
-		}
-		if y >= m.modalRect.y+m.modalRect.h-3 {
-			if x < m.modalRect.x+m.modalRect.w/2 {
-				m.saveNodeModal()
-			} else {
-				m.editorMode = editorModeNormal
-				m.modalDraft = nil
-			}
-			return m, nil
-		}
-		row := y - m.modalRect.y - 4
-		if row >= 0 {
-			index := row / 3
-			if index >= 0 && index < len(m.modalDraft) {
-				m.modalFocusedControl = index
-			}
-		}
-		return m, nil
+		return m.handleNodeFormClick(x, y)
 	}
 
 	if inside(x, y, m.aiPromptInputRect) {
@@ -800,7 +773,12 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 	}
 
 	if inside(x, y, m.canvasRect) {
+		connecting := m.editorMode == editorModeConnect
 		m.cancelConnection()
+		if i := m.connectionAt(x, y); i >= 0 && !additive && !connecting {
+			m.selectConnection(i)
+			return m, nil
+		}
 		if !additive {
 			m.clearSelection()
 		}
@@ -867,17 +845,20 @@ func (m *model) openWorkflowContextMenu(x, y int) {
 	m.editorMenuTarget = -1
 	m.editorCreateAtMenu = true
 
-	for i, node := range m.editorNodes {
-		if inside(x, y, m.nodeRects[node.id]) {
-			m.selectedNode = i
-			m.editorMenuTarget = i
-			break
+	if i := m.nodeIndexAt(x, y); i >= 0 {
+		// A right click inside a selection acts on all of it, as on the web.
+		if !m.isNodeSelected(i) {
+			m.selectOnly(i)
 		}
+		m.editorMenuTarget = i
+	} else if i := m.connectionAt(x, y); i >= 0 {
+		m.selectConnection(i)
 	}
 	if m.editorMenuTarget < 0 && !inside(x, y, m.canvasRect) {
 		m.closeEditorOverlay()
 		return
 	}
+	m.editorMenuSelected = firstMenuItem(m.editorMenuItems())
 
 	contentX := x - m.canvasRect.x - 2
 	contentY := y - m.canvasRect.y - 2
@@ -900,9 +881,9 @@ func (m model) updateEditorOverlayKey(msg tea.KeyPressMsg) model {
 	case "esc":
 		m.closeEditorOverlay()
 	case "up":
-		m.editorMenuSelected = clamp(m.editorMenuSelected-1, 0, len(items)-1)
+		m.editorMenuSelected = nextMenuItem(items, m.editorMenuSelected, -1)
 	case "down":
-		m.editorMenuSelected = clamp(m.editorMenuSelected+1, 0, len(items)-1)
+		m.editorMenuSelected = nextMenuItem(items, m.editorMenuSelected, 1)
 	}
 	if msg.Code == tea.KeyEnter {
 		if len(items) > 0 {
@@ -944,18 +925,7 @@ func (m model) editorMenuItems() []editorMenuItem {
 	}
 
 	if m.editorOverlay == editorOverlayContext {
-		if m.editorMenuTarget >= 0 && m.editorMenuTarget < len(m.editorNodes) {
-			items := []editorMenuItem{
-				{label: "Edit node", action: editorActionEdit},
-			}
-			if !isStartKind(m.editorNodes[m.editorMenuTarget].kind) {
-				items = append(items, editorMenuItem{label: "Delete node", action: editorActionDelete})
-			}
-			return items
-		}
-		return []editorMenuItem{
-			{label: "Create node", action: editorActionOpenCreate},
-		}
+		return m.contextMenuItems()
 	}
 
 	items := []editorMenuItem{
@@ -993,9 +963,9 @@ func (m model) editorMenuRect() rect {
 func (m model) contextMenuSize() (int, int) {
 	width := 0
 	for _, item := range m.editorMenuItems() {
-		width = max(width, len(item.label)+6)
+		width = max(width, len([]rune(item.label))+len([]rune(item.shortcut))+8)
 	}
-	return max(width, 16), len(m.editorMenuItems()) + 2
+	return max(width, 22), len(m.editorMenuItems()) + 2
 }
 
 func (m model) editorCreateMenuItems() []editorMenuItem {
@@ -1012,12 +982,25 @@ func (m model) editorCreateMenuItems() []editorMenuItem {
 }
 
 func (m *model) runEditorAction(item editorMenuItem) {
-	target := m.editorMenuTarget
-	if target >= 0 && target < len(m.editorNodes) {
-		m.selectedNode = target
+	if !item.selectable() {
+		return
 	}
 
 	switch item.action {
+	case editorActionUndo:
+		m.closeEditorOverlay()
+		m.undo()
+	case editorActionRedo:
+		m.closeEditorOverlay()
+		m.redo()
+	case editorActionCopy:
+		m.closeEditorOverlay()
+		m.copySelection()
+		m.pasteCount = 0
+	case editorActionPaste:
+		x, y := m.toWorld(m.editorMenuX, m.editorMenuY)
+		m.closeEditorOverlay()
+		m.pasteAt(x, y)
 	case editorActionOpenCreate:
 		m.editorOverlay = editorOverlayCreate
 		m.editorMenuSelected = 0
@@ -1032,7 +1015,7 @@ func (m *model) runEditorAction(item editorMenuItem) {
 		m.closeEditorOverlay()
 	case editorActionDelete:
 		m.closeEditorOverlay()
-		m.deleteSelectedEditorNode()
+		m.deleteSelection()
 	case editorActionEdit:
 		m.closeEditorOverlay()
 		m.openNodeModal()
@@ -1066,6 +1049,7 @@ func (m *model) moveSelectedEditorNode(dx, dy int) {
 		m.panBy(dx*wheelColumns, dy*wheelRows)
 		return
 	}
+	m.pushUndo()
 	for _, index := range indices {
 		m.editorNodes[index].x += dx
 		m.editorNodes[index].y += dy
@@ -1077,18 +1061,20 @@ func (m *model) moveSelectedEditorNode(dx, dy int) {
 // addEditorNode continues from the selected node when there is one: the new node
 // goes after it, already connected.
 func (m *model) addEditorNode(kind string) {
+	m.pushUndo()
+
 	width, height := m.nodeSize(kind, m.nodeTitleForKind(kind))
 	if !m.hasSelectedEditorNode() {
 		content := m.canvasContentRect()
 		x, y := m.toWorld(content.w/2-width/2, content.h/2-height/2)
-		m.addEditorNodeAt(kind, x, y)
+		m.insertNode(kind, x, y)
 		return
 	}
 
 	source := m.editorNodes[m.selectedNode]
 	output := m.firstFreeOutput(source)
 	x, y := m.nextNodeSpot(source, width, height)
-	m.addEditorNodeAt(kind, x, y)
+	m.insertNode(kind, x, y)
 	m.revealNode(m.selectedNode)
 
 	inputs := m.nodeInputs(kind)
@@ -1104,6 +1090,11 @@ func (m *model) addEditorNode(kind string) {
 }
 
 func (m *model) addEditorNodeAt(kind string, x, y int) {
+	m.pushUndo()
+	m.insertNode(kind, x, y)
+}
+
+func (m *model) insertNode(kind string, x, y int) {
 	title := m.nodeTitleForKind(kind)
 	width, height := m.nodeSize(kind, title)
 	node := editorNode{
@@ -1112,64 +1103,13 @@ func (m *model) addEditorNodeAt(kind string, x, y int) {
 		label:    title,
 		w:        width,
 		h:        height,
-		controls: defaultControls(kind),
+		controls: m.nodeControls(kind),
 	}
 	node.x, node.y = x, y
 	m.editorNodes = append(m.editorNodes, node)
 	m.selectOnly(len(m.editorNodes) - 1)
 	m.rebuildNodeRects()
 	m.markEditorDirty()
-}
-
-func (m *model) openNodeModal() {
-	if !m.hasSelectedEditorNode() {
-		return
-	}
-	m.editorMode = editorModeModal
-	m.modalFocusedControl = 0
-	m.modalDraft = append([]nodeControl(nil), m.editorNodes[m.selectedNode].controls...)
-}
-
-func (m model) updateNodeModalKey(msg tea.KeyPressMsg) model {
-	switch msg.String() {
-	case "esc":
-		m.editorMode = editorModeNormal
-		m.modalDraft = nil
-	case "tab":
-		if len(m.modalDraft) > 0 {
-			m.modalFocusedControl = (m.modalFocusedControl + 1) % len(m.modalDraft)
-		}
-	case "backspace":
-		if len(m.modalDraft) > 0 {
-			value := []rune(m.modalDraft[m.modalFocusedControl].value)
-			if len(value) > 0 {
-				m.modalDraft[m.modalFocusedControl].value = string(value[:len(value)-1])
-			}
-		}
-	}
-	if msg.Code == tea.KeyEnter {
-		m.saveNodeModal()
-	}
-	text := msg.Key().Text
-	if text != "" && len(m.modalDraft) > 0 {
-		m.modalDraft[m.modalFocusedControl].value += text
-	}
-	return m
-}
-
-func (m *model) saveNodeModal() {
-	if m.hasSelectedEditorNode() {
-		m.editorNodes[m.selectedNode].controls = append([]nodeControl(nil), m.modalDraft...)
-		for _, control := range m.modalDraft {
-			if control.name == "label" {
-				m.editorNodes[m.selectedNode].label = fallbackString(control.value, m.editorNodes[m.selectedNode].kind)
-				m.editorNodes[m.selectedNode].w = editorNodeWidth(m.editorNodes[m.selectedNode].label)
-			}
-		}
-		m.markEditorDirty()
-	}
-	m.editorMode = editorModeNormal
-	m.modalDraft = nil
 }
 
 // deleteSelectedEditorNode removes the selection, except a Start node, which every
@@ -1184,8 +1124,9 @@ func (m *model) deleteSelectedEditorNode() {
 	if len(deleted) == 0 {
 		return
 	}
+	m.pushUndo()
 
-	nodes := m.editorNodes[:0]
+	nodes := make([]editorNode, 0, len(m.editorNodes))
 	for _, node := range m.editorNodes {
 		if !deleted[node.id] {
 			nodes = append(nodes, node)
@@ -1193,7 +1134,7 @@ func (m *model) deleteSelectedEditorNode() {
 	}
 	m.editorNodes = nodes
 
-	connections := m.editorConnections[:0]
+	connections := make([]editorConnection, 0, len(m.editorConnections))
 	for _, conn := range m.editorConnections {
 		if !deleted[conn.source] && !deleted[conn.target] {
 			connections = append(connections, conn)
@@ -1381,13 +1322,36 @@ func (m model) drawContextMenu(grid [][]canvasCell) {
 			drawStyledRune(grid, col, row, ' ', &fill)
 		}
 	}
+	hint := fill.Foreground(mutedTextColor)
+	disabled := fill.Foreground(panelBorder)
+	danger := fill.Foreground(errorColor)
+	line := fill.Foreground(panelBorder)
+
 	for i, item := range items {
-		prefix, style := "  ", &fill
-		if i == m.editorMenuSelected {
-			prefix, style = "› ", &active
+		row := y + 1 + i
+		if item.separator {
+			for col := x + 1; col < x+width-1; col++ {
+				drawStyledRune(grid, col, row, '─', &line)
+			}
+			continue
 		}
-		for j, r := range []rune(truncatePlain(prefix+item.label, max(width-4, 1))) {
-			drawStyledRune(grid, x+2+j, y+1+i, r, style)
+
+		prefix, style, shortcut := "  ", &fill, &hint
+		switch {
+		case item.disabled:
+			style, shortcut = &disabled, &disabled
+		case i == m.editorMenuSelected:
+			prefix, style = "› ", &active
+		case item.danger:
+			style = &danger
+		}
+
+		for j, r := range []rune(prefix + item.label) {
+			drawStyledRune(grid, x+1+j, row, r, style)
+		}
+		keys := []rune(item.shortcut)
+		for j, r := range keys {
+			drawStyledRune(grid, x+width-2-len(keys)+j, row, r, shortcut)
 		}
 	}
 }
@@ -1473,7 +1437,8 @@ func (m model) nodeTitleForKind(kind string) string {
 }
 
 func (m model) controlsFromAPI(kind, label string, raw map[string]any) []nodeControl {
-	controls := append([]nodeControl(nil), defaultControls(kind)...)
+	_, known := m.nodeDefinition(kind)
+	controls := append([]nodeControl(nil), m.nodeControls(kind)...)
 	if len(controls) == 0 {
 		controls = []nodeControl{{name: "label", label: "Label", value: label}}
 	}
@@ -1494,15 +1459,16 @@ func (m model) controlsFromAPI(kind, label string, raw map[string]any) []nodeCon
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		value := strings.TrimSpace(fmt.Sprintf("%v", raw[key]))
+		value := controlValue(raw[key])
 		if idx, ok := indexByName[key]; ok {
 			controls[idx].value = value
 			continue
 		}
 		controls = append(controls, nodeControl{
-			name:  key,
-			label: titleizeControlName(key),
-			value: value,
+			name:   key,
+			label:  titleizeControlName(key),
+			value:  value,
+			hidden: known,
 		})
 	}
 
@@ -1545,9 +1511,9 @@ func defaultControls(kind string) []nodeControl {
 	case "variable":
 		return []nodeControl{
 			{name: "label", label: "Label", value: "Variable"},
-			{name: "name", label: "Name", value: "x"},
-			{name: "type", label: "Type", value: "Integer"},
-			{name: "value", label: "Value", value: "1"},
+			{name: "var_name", label: "Variable Name", value: "x"},
+			{name: "var_type", label: "Type", value: "Integer"},
+			{name: "var_value", label: "Value", value: "1"},
 		}
 	case "output":
 		return []nodeControl{

@@ -192,6 +192,22 @@ func drawWireCell(grid [][]canvasCell, x, y int, r rune, style *lipgloss.Style) 
 	drawStyledRune(grid, x, y, r, style)
 }
 
+// heavyWire redraws a route in thicker lines, to mark the selected connection.
+func heavyWire(grid [][]canvasCell, points []canvasPoint, style *lipgloss.Style) {
+	heavy := map[rune]rune{'─': '━', '│': '┃', '╭': '┏', '╮': '┓', '╰': '┗', '╯': '┛', '┼': '╋'}
+	for i := 0; i+1 < len(points); i++ {
+		from, to := points[i], points[i+1]
+		dx, dy := sign(to.x-from.x), sign(to.y-from.y)
+		for x, y := from.x, from.y; x != to.x || y != to.y; x, y = x+dx, y+dy {
+			if y >= 0 && y < len(grid) && x >= 0 && x < len(grid[y]) {
+				if thick, ok := heavy[grid[y][x].ch]; ok {
+					drawStyledRune(grid, x, y, thick, style)
+				}
+			}
+		}
+	}
+}
+
 // drawWire draws a route that ends in an arrow on its last cell.
 func drawWire(grid [][]canvasCell, points []canvasPoint, line, head *lipgloss.Style) {
 	for i := 0; i+1 < len(points); i++ {
@@ -255,6 +271,14 @@ func (m model) drawConnections(grid [][]canvasCell) {
 			} else {
 				drawWire(grid, path, &quiet, &active)
 			}
+		}
+	}
+
+	if m.hasSelectedConnection() {
+		if path, ok := m.connectionPath(m.editorConnections[m.selectedConnection]); ok {
+			bold := active.Bold(true)
+			drawWire(grid, path, &bold, &bold)
+			heavyWire(grid, path, &bold)
 		}
 	}
 }
@@ -430,12 +454,14 @@ func (m *model) finishEditorConnection() {
 	for i, conn := range m.editorConnections {
 		saved, _ := m.savedPorts(conn)
 		if conn.source == source.id && conn.target == target.id && saved == output {
+			m.pushUndo()
 			m.editorConnections = append(m.editorConnections[:i:i], m.editorConnections[i+1:]...)
 			m.markEditorDirty()
 			return
 		}
 	}
 
+	m.pushUndo()
 	m.editorConnections = append(m.editorConnections, editorConnection{
 		source:       source.id,
 		sourceOutput: output,

@@ -951,13 +951,6 @@ func TestCtrlWheelZoomsAroundTheCursor(t *testing.T) {
 	}
 }
 
-func abs(value int) int {
-	if value < 0 {
-		return -value
-	}
-	return value
-}
-
 func TestZoomKeysStopAtTheirLimits(t *testing.T) {
 	m := canvasModel()
 
@@ -1324,5 +1317,725 @@ func TestLoginShowsTheVersion(t *testing.T) {
 	footer := lines[len(lines)-1]
 	if !strings.Contains(footer, "v"+treadle.Version) || lipgloss.Width(footer) != 110 {
 		t.Fatalf("footer = %q", footer)
+	}
+}
+
+var loggerNode = apiNodeDef{
+	Type: "Logger", Title: "Logger", Category: "utility", Inputs: []any{"exec"}, Outputs: []any{"exec"},
+	UIFields: []apiUIField{
+		{Type: "select", Name: "level", Label: "Level", Default: "info", Options: []any{
+			map[string]any{"label": "Debug", "value": "debug"},
+			map[string]any{"label": "Info", "value": "info"},
+			map[string]any{"label": "Error", "value": "error"},
+		}},
+		{Type: "text", Name: "message", Label: "Message", Default: "Log message"},
+	},
+}
+
+var httpNode = apiNodeDef{
+	Type: "HTTP Request", Title: "HTTP Request", Category: "integration", Inputs: []any{"exec"}, Outputs: []any{"success", "error"},
+	UIFields: []apiUIField{
+		{Type: "select", Name: "method", Label: "Method", Default: "GET", Options: []any{"GET", "POST"}},
+		{Type: "text", Name: "url", Label: "Endpoint URL", Default: "https://api.example.com"},
+		{Type: "text", Name: "headers", Label: "Headers (JSON)", Default: "{}"},
+		{Type: "text", Name: "body", Label: "Body", Default: ""},
+	},
+}
+
+func formModel(width, height int, def apiNodeDef) model {
+	m := editorModel(width, height)
+	m.availableNodes = []apiNodeDef{def}
+	m.editorNodes = nil
+	m.editorConnections = nil
+	m.addEditorNodeAt(def.Type, 10, 4)
+	m.openNodeModal()
+	return m
+}
+
+func (m model) control(name string) nodeControl {
+	for _, control := range m.editorNodes[m.selectedNode].controls {
+		if control.name == name {
+			return control
+		}
+	}
+	return nodeControl{}
+}
+
+func TestNewNodesGetTheFieldsTheServerDefines(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+
+	var names []string
+	for _, control := range m.modalDraft {
+		names = append(names, control.name)
+	}
+
+	if got := strings.Join(names, " "); got != "label level message" {
+		t.Fatalf("fields = %q", got)
+	}
+	if got := m.control("level").value; got != "info" {
+		t.Fatalf("level default = %q", got)
+	}
+}
+
+func TestLoadedValuesFillTheServerFields(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.closeNodeForm()
+
+	controls := m.controlsFromAPI("Logger", "Audit", map[string]any{
+		"level": "error", "message": "boom", "extra": map[string]any{"a": 1.0},
+	})
+
+	values := map[string]string{}
+	for _, control := range controls {
+		values[control.name] = control.value
+	}
+	if values["level"] != "error" || values["message"] != "boom" || values["label"] != "Audit" {
+		t.Fatalf("values = %v", values)
+	}
+	if values["extra"] != `{"a":1}` {
+		t.Fatalf("a field the form doesn't know was lost: %q", values["extra"])
+	}
+}
+
+func TestFormDrawsEveryFieldWhereItIsClickable(t *testing.T) {
+	for _, size := range [][2]int{{72, 17}, {80, 23}, {80, 24}, {110, 36}, {200, 60}} {
+		m := formModel(size[0], size[1], httpNode)
+		lines := screenLines(m)
+		l := m.nodeForm()
+
+		if len(lines) != size[1] {
+			t.Fatalf("%v: screen has %d lines", size, len(lines))
+		}
+		for i, field := range l.fields {
+			want := strings.ToUpper(m.modalDraft[l.first+i].label)
+			if !strings.Contains(lines[field.y], want) {
+				t.Errorf("%v: no %q on row %d: %q", size, want, field.y, lines[field.y])
+			}
+		}
+		saveRow := l.save.y + l.save.h/2
+		if !strings.Contains(lines[saveRow], "Save") {
+			t.Errorf("%v: no Save on row %d: %q", size, saveRow, lines[saveRow])
+		}
+		if !strings.Contains(lines[l.cancel.y], "Cancel") {
+			t.Errorf("%v: no Cancel on row %d: %q", size, l.cancel.y, lines[l.cancel.y])
+		}
+		if l.cancel.y >= size[1]-footerHeight {
+			t.Errorf("%v: Cancel on row %d collides with the footer", size, l.cancel.y)
+		}
+		for i, line := range lines {
+			if width := lipgloss.Width(line); width > size[0] {
+				t.Fatalf("%v: line %d is %d wide: %q", size, i, width, line)
+			}
+		}
+	}
+}
+
+func TestTheFocusedFieldStaysVisibleOnSmallTerminals(t *testing.T) {
+	m := formModel(72, 17, httpNode)
+
+	for range len(m.modalDraft) {
+		next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = next.(model)
+
+		l := m.nodeForm()
+		if m.modalFocusedControl < l.first || m.modalFocusedControl >= l.first+len(l.fields) {
+			t.Fatalf("field %d is outside rows %d to %d", m.modalFocusedControl, l.first, l.first+len(l.fields)-1)
+		}
+	}
+}
+
+func TestTypingQInTheFormDoesNotQuit(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+
+	next, cmd := m.Update(keyPress("q"))
+
+	if got := next.(model).modalInput.Value(); !strings.HasSuffix(got, "q") {
+		t.Fatalf("field = %q", got)
+	}
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("typing q quit the app")
+		}
+	}
+}
+
+func TestPastingIntoTheForm(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("")
+
+	next, _ := m.Update(tea.PasteMsg{Content: "pasted"})
+
+	if got := next.(model).modalInput.Value(); got != "pasted" {
+		t.Fatalf("field = %q", got)
+	}
+}
+
+func TestEditingAFieldAndSaving(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+
+	var next tea.Model = m
+	next, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	next, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	next, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	next, _ = next.Update(keyPress("!"))
+	next, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := next.(model)
+
+	if got.editorMode != editorModeNormal {
+		t.Fatalf("mode = %q", got.editorMode)
+	}
+	if value := got.control("level").value; value != "error" {
+		t.Fatalf("level = %q", value)
+	}
+	if value := got.control("message").value; value != "Log message!" {
+		t.Fatalf("message = %q", value)
+	}
+
+	controls := got.workflowRequestPayload().Workflow.Nodes[0].Controls
+	if controls["level"] != "error" {
+		t.Fatalf("saved controls = %v", controls)
+	}
+}
+
+func TestSelectsWrapAround(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.focusFormField(1)
+
+	for _, want := range []string{"error", "debug", "info"} {
+		m.cycleFormOption(1)
+		if got := m.modalDraft[1].value; got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEscDiscardsTheChanges(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("changed")
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	got := next.(model)
+
+	if got.editorMode != editorModeNormal || got.control("label").value != "Logger" {
+		t.Fatalf("mode = %q, label = %q", got.editorMode, got.control("label").value)
+	}
+}
+
+func TestClickingTheFormButtons(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("Renamed")
+	l := m.nodeForm()
+
+	saved, _ := m.handleNodeFormClick(l.save.x+2, l.save.y+1)
+	if saved.editorMode != editorModeNormal || saved.editorNodes[0].label != "Renamed" {
+		t.Fatalf("mode = %q, label = %q", saved.editorMode, saved.editorNodes[0].label)
+	}
+
+	m = formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("Renamed")
+	l = m.nodeForm()
+	cancelled, _ := m.handleNodeFormClick(l.cancel.x+l.cancel.w/2, l.cancel.y)
+	if cancelled.editorMode != editorModeNormal || cancelled.editorNodes[0].label != "Logger" {
+		t.Fatalf("mode = %q, label = %q", cancelled.editorMode, cancelled.editorNodes[0].label)
+	}
+}
+
+func TestClickingAFieldFocusesItAndKeepsTheEdit(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("Renamed")
+	l := m.nodeForm()
+
+	m, _ = m.handleNodeFormClick(l.fields[2].x+1, l.fields[2].y+1)
+
+	if m.modalFocusedControl != 2 || m.modalDraft[0].value != "Renamed" {
+		t.Fatalf("focus = %d, label = %q", m.modalFocusedControl, m.modalDraft[0].value)
+	}
+	if got := m.modalInput.Value(); got != "Log message" {
+		t.Fatalf("field = %q", got)
+	}
+}
+
+func TestMultilineValuesAreNotFlattened(t *testing.T) {
+	code := "a = 1\nb = 2"
+	m := formModel(110, 36, loggerNode)
+	m.modalDraft[2].value = code
+	m.editorNodes[0].controls[2].value = code
+
+	m.focusFormField(2)
+	next, _ := m.Update(keyPress("x"))
+	next, _ = next.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if got := next.(model).control("message").value; got != code {
+		t.Fatalf("value = %q", got)
+	}
+}
+
+func TestFormShowsWhatTheNodeDoes(t *testing.T) {
+	def := loggerNode
+	def.Description = "Writes a message to the execution log."
+	m := formModel(110, 36, def)
+
+	screen := strings.Join(screenLines(m), "\n")
+
+	if !strings.Contains(screen, def.Description) {
+		t.Fatal("the description is not on screen")
+	}
+}
+
+func startFromTheWebEditor(t *testing.T) model {
+	t.Helper()
+	m := editorModel(110, 36)
+	m.availableNodes = []apiNodeDef{{Type: "Start", Title: "Start", Outputs: []any{"exec"}}}
+	m.beginWorkflowEditorFromAPI(apiFlow{ID: 1, Nodes: []apiNode{{
+		ID: "a", Type: "Start", Label: "Start",
+		Controls: map[string]any{"code_elixir": "IO.puts(1)", "code_python": "print(1)"},
+	}}})
+	m.openNodeModal()
+	return m
+}
+
+func TestWebEditorInternalsStayOutOfTheForm(t *testing.T) {
+	m := startFromTheWebEditor(t)
+
+	if len(m.modalDraft) != 1 || m.modalDraft[0].name != "label" {
+		t.Fatalf("form fields = %+v", m.modalDraft)
+	}
+	if screen := strings.ToUpper(strings.Join(screenLines(m), "\n")); strings.Contains(screen, "CODE ELIXIR") {
+		t.Fatal("a web editor internal is on screen")
+	}
+}
+
+func TestWebEditorInternalsSurviveEditingAndSaving(t *testing.T) {
+	m := startFromTheWebEditor(t)
+	m.modalInput.SetValue("Renamed")
+
+	m.saveNodeModal()
+
+	controls := m.workflowRequestPayload().Workflow.Nodes[0].Controls
+	if controls["code_elixir"] != "IO.puts(1)" || controls["code_python"] != "print(1)" {
+		t.Fatalf("controls = %v", controls)
+	}
+	if m.editorNodes[0].label != "Renamed" {
+		t.Fatalf("label = %q", m.editorNodes[0].label)
+	}
+}
+
+func connectedPair(t *testing.T) (model, editorNode, editorNode) {
+	t.Helper()
+	m := canvasModel()
+	source := m.place("Logger", 10, 4)
+	target := m.place("Output", 60, 14)
+	m = m.dragWire(m.portScreen(source, 0), m.bodyScreen(target))
+	if len(m.editorConnections) != 1 {
+		t.Fatalf("connections = %+v", m.editorConnections)
+	}
+	m.clearSelection()
+	return m, source, target
+}
+
+// wireScreen finds a screen cell in the middle of the first wire's route.
+func (m model) wireScreen(t *testing.T) [2]int {
+	t.Helper()
+	path, _ := m.connectionPath(m.editorConnections[0])
+	content := m.canvasContentRect()
+	return [2]int{content.x + (path[0].x+path[1].x)/2, content.y + path[0].y}
+}
+
+func TestClickingAWireSelectsIt(t *testing.T) {
+	m, _, _ := connectedPair(t)
+
+	m = m.press(m.wireScreen(t), 0)
+
+	if m.selectedConnection != 0 || len(m.selectedIndices()) != 0 {
+		t.Fatalf("connection = %d, nodes = %v", m.selectedConnection, m.selectedIndices())
+	}
+	if !strings.Contains(strings.Join(screenLines(m), "\n"), "━") {
+		t.Fatal("the selected wire is not drawn heavier")
+	}
+}
+
+func TestDeleteRemovesTheSelectedWireAndKeepsTheNodes(t *testing.T) {
+	m, _, _ := connectedPair(t)
+	m = m.press(m.wireScreen(t), 0)
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDelete})
+	got := next.(model)
+
+	if len(got.editorConnections) != 0 || len(got.editorNodes) != 2 {
+		t.Fatalf("connections = %d, nodes = %d", len(got.editorConnections), len(got.editorNodes))
+	}
+}
+
+func TestSelectingANodeDeselectsTheWire(t *testing.T) {
+	m, source, _ := connectedPair(t)
+	m = m.press(m.wireScreen(t), 0)
+
+	m = m.press(m.bodyScreen(source), 0)
+
+	if m.hasSelectedConnection() {
+		t.Fatal("the wire is still selected")
+	}
+}
+
+func TestEscClearsAWireSelectionBeforeLeavingTheEditor(t *testing.T) {
+	m, _, _ := connectedPair(t)
+	m = m.press(m.wireScreen(t), 0)
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if got := next.(model); got.screen != screenWorkflowEditor || got.hasSelectedConnection() {
+		t.Fatalf("screen = %q, selected = %v", got.screen, got.hasSelectedConnection())
+	}
+}
+
+func TestRightClickingAWireOffersDelete(t *testing.T) {
+	m, _, _ := connectedPair(t)
+	p := m.wireScreen(t)
+
+	next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+	got := next.(model)
+
+	if !got.hasSelectedConnection() || got.editorOverlay != editorOverlayContext {
+		t.Fatalf("selected = %v, overlay = %q", got.hasSelectedConnection(), got.editorOverlay)
+	}
+	if !menuHas(got, "Delete") {
+		t.Fatalf("items = %+v", got.editorMenuItems())
+	}
+}
+
+func menuHas(m model, label string) bool {
+	for _, item := range m.editorMenuItems() {
+		if item.label == label {
+			return true
+		}
+	}
+	return false
+}
+
+func TestContextMenuMatchesTheSelection(t *testing.T) {
+	m := canvasModel()
+	start := m.place("Start", 4, 4)
+	logger := m.place("Logger", 40, 4)
+
+	open := func(p [2]int) model {
+		next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+		return next.(model)
+	}
+
+	empty := open([2]int{m.canvasRect.x + 80, m.canvasRect.y + 25})
+	if menuHas(empty, "Copy") || menuHas(empty, "Delete") || !menuHas(empty, "Create node") || !menuHas(empty, "Undo") {
+		t.Fatalf("empty canvas: %+v", empty.editorMenuItems())
+	}
+
+	onLogger := open(m.bodyScreen(logger))
+	if !menuHas(onLogger, "Copy") || !menuHas(onLogger, "Delete") || !menuHas(onLogger, "Edit") {
+		t.Fatalf("logger: %+v", onLogger.editorMenuItems())
+	}
+
+	onStart := open(m.bodyScreen(start))
+	if menuHas(onStart, "Copy") || menuHas(onStart, "Delete") {
+		t.Fatalf("start: %+v", onStart.editorMenuItems())
+	}
+}
+
+func TestMenuSkipsSeparatorsAndDisabledRows(t *testing.T) {
+	items := []editorMenuItem{
+		{label: "Undo", disabled: true},
+		{label: "Redo", disabled: true},
+		{separator: true},
+		{label: "Copy"},
+		{separator: true},
+		{label: "Create"},
+	}
+
+	if got := firstMenuItem(items); got != 3 {
+		t.Fatalf("first = %d", got)
+	}
+	if got := nextMenuItem(items, 3, 1); got != 5 {
+		t.Fatalf("down = %d", got)
+	}
+	if got := nextMenuItem(items, 3, -1); got != 3 {
+		t.Fatalf("up = %d", got)
+	}
+}
+
+func TestDisabledMenuItemsDoNothing(t *testing.T) {
+	m := canvasModel()
+	m.place("Logger", 4, 4)
+	m.undoStack = nil
+
+	m.runEditorAction(editorMenuItem{label: "Undo", action: editorActionUndo, disabled: true})
+
+	if len(m.editorNodes) != 1 {
+		t.Fatalf("nodes = %d", len(m.editorNodes))
+	}
+}
+
+func TestContextMenuIsDrawnWithItsShortcuts(t *testing.T) {
+	m := canvasModel()
+	logger := m.place("Logger", 40, 4)
+	p := m.bodyScreen(logger)
+
+	next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+
+	screen := strings.Join(screenLines(next.(model)), "\n")
+	for _, want := range []string{"Undo", "ctrl+z", "Redo", "Copy", "ctrl+c", "Delete", "del", "Create node"} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("menu does not show %q", want)
+		}
+	}
+}
+
+func TestClickingAMenuRowRunsThatItem(t *testing.T) {
+	m := canvasModel()
+	logger := m.place("Logger", 40, 4)
+	p := m.bodyScreen(logger)
+	next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+	got := next.(model)
+
+	row := -1
+	for i, item := range got.editorMenuItems() {
+		if item.label == "Delete" {
+			row = i
+		}
+	}
+	r := got.editorMenuRect()
+	next, _ = got.Update(tea.MouseClickMsg{X: r.x + 3, Y: r.y + 1 + row, Button: tea.MouseLeft})
+
+	if nodes := next.(model).editorNodes; len(nodes) != 0 {
+		t.Fatalf("nodes = %+v", nodes)
+	}
+}
+
+func TestUndoAndRedoCoverEveryKindOfChange(t *testing.T) {
+	m, source, target := connectedPair(t)
+	m.undoStack, m.redoStack = nil, nil
+	before := m.snapshot()
+
+	steps := []func(m *model){
+		func(m *model) { m.addEditorNodeAt("Logger", 90, 20) },
+		func(m *model) { m.selectOnly(0); m.moveSelectedEditorNode(1, 0) },
+		func(m *model) { m.selectOnly(0); m.deleteSelectedEditorNode() },
+	}
+	for _, step := range steps {
+		step(&m)
+	}
+
+	for range steps {
+		next, _ := m.Update(tea.KeyPressMsg{Code: 'z', Mod: tea.ModCtrl})
+		m = next.(model)
+	}
+	if len(m.editorNodes) != 2 || m.editorNodes[0].x != before.nodes[0].x || len(m.editorConnections) != 1 {
+		t.Fatalf("after undo: nodes = %+v, connections = %+v", m.editorNodes, m.editorConnections)
+	}
+
+	for range steps {
+		next, _ := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+		m = next.(model)
+	}
+	if len(m.editorNodes) != 2 || m.editorNodes[0].id == source.id || len(m.editorConnections) != 0 {
+		t.Fatalf("after redo: nodes = %+v, connections = %+v", m.editorNodes, m.editorConnections)
+	}
+	_ = target
+}
+
+func TestAWholeDragIsOneUndoStep(t *testing.T) {
+	m := canvasModel()
+	logger := m.place("Logger", 10, 4)
+	m.undoStack = nil
+	body := m.bodyScreen(logger)
+
+	next, _ := m.Update(tea.MouseClickMsg{X: body[0], Y: body[1], Button: tea.MouseLeft})
+	for i := 1; i <= 8; i++ {
+		next, _ = next.Update(tea.MouseMotionMsg{X: body[0] + i, Y: body[1], Button: tea.MouseLeft})
+	}
+	next, _ = next.Update(tea.MouseReleaseMsg{X: body[0] + 8, Y: body[1], Button: tea.MouseLeft})
+	got := next.(model)
+
+	if len(got.undoStack) != 1 {
+		t.Fatalf("undo steps = %d", len(got.undoStack))
+	}
+	got.undo()
+	if got.editorNodes[0].x != 10 {
+		t.Fatalf("x = %d", got.editorNodes[0].x)
+	}
+}
+
+func TestAClickWithoutMovingAddsNoUndoStep(t *testing.T) {
+	m := canvasModel()
+	logger := m.place("Logger", 10, 4)
+	m.undoStack = nil
+
+	m = m.press(m.bodyScreen(logger), 0)
+
+	if len(m.undoStack) != 0 {
+		t.Fatalf("undo steps = %d", len(m.undoStack))
+	}
+}
+
+func TestAddingANodeAfterAnotherIsOneUndoStep(t *testing.T) {
+	m := canvasModel()
+	m.place("Start", 4, 4)
+	m.selectedNode = 0
+	m.undoStack = nil
+
+	m.addEditorNode("Logger")
+	m.undo()
+
+	if len(m.editorNodes) != 1 || len(m.editorConnections) != 0 {
+		t.Fatalf("nodes = %d, connections = %d", len(m.editorNodes), len(m.editorConnections))
+	}
+}
+
+func TestANewChangeClearsRedo(t *testing.T) {
+	m := canvasModel()
+	m.place("Logger", 4, 4)
+	m.undo()
+
+	m.addEditorNodeAt("Logger", 8, 8)
+
+	if len(m.redoStack) != 0 {
+		t.Fatalf("redo steps = %d", len(m.redoStack))
+	}
+}
+
+func TestUndoHistoryIsCapped(t *testing.T) {
+	m := canvasModel()
+	for i := range maxUndoSteps + 10 {
+		m.addEditorNodeAt("Logger", i*20, 4)
+	}
+
+	if len(m.undoStack) != maxUndoSteps {
+		t.Fatalf("undo steps = %d", len(m.undoStack))
+	}
+}
+
+func TestUndoDoesNotShareStateWithLaterEdits(t *testing.T) {
+	m := formModel(110, 36, loggerNode)
+	m.modalInput.SetValue("First")
+	m.saveNodeModal()
+
+	m.openNodeModal()
+	m.modalInput.SetValue("Second")
+	m.saveNodeModal()
+
+	m.undo()
+	if got := m.editorNodes[0].label; got != "First" {
+		t.Fatalf("label = %q", got)
+	}
+}
+
+func TestCtrlCCopiesInTheEditorAndQuitsWithNothingSelected(t *testing.T) {
+	m := canvasModel()
+	m.place("Logger", 10, 4)
+	m.selectOnly(0)
+
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("ctrl+c quit with a node selected")
+		}
+	}
+	if got := len(next.(model).clipboardNodes); got != 1 {
+		t.Fatalf("copied %d nodes", got)
+	}
+
+	m.clearSelection()
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+c did nothing with no selection")
+	}
+	if _, quit := cmd().(tea.QuitMsg); !quit {
+		t.Fatal("ctrl+c did not quit with no selection")
+	}
+}
+
+func TestPasteKeepsTheConnectionsBetweenCopiedNodes(t *testing.T) {
+	m := canvasModel()
+	first := m.place("Condition", 10, 4)
+	second := m.place("Logger", 50, 4)
+	outside := m.place("Output", 90, 4)
+	m.editorConnections = []editorConnection{
+		{source: first.id, sourceOutput: "false", target: second.id, targetInput: "exec"},
+		{source: second.id, sourceOutput: "exec", target: outside.id, targetInput: "exec"},
+	}
+	m.setSelection([]int{0, 1})
+
+	m.copySelection()
+	m.pasteNearOriginal()
+
+	if len(m.editorNodes) != 5 || len(m.editorConnections) != 3 {
+		t.Fatalf("nodes = %d, connections = %d", len(m.editorNodes), len(m.editorConnections))
+	}
+	copied := m.editorConnections[2]
+	if copied.source == first.id || copied.target == second.id || copied.sourceOutput != "false" {
+		t.Fatalf("copied connection = %+v", copied)
+	}
+	if got := m.selectedIndices(); len(got) != 2 || got[0] != 3 {
+		t.Fatalf("selected = %v", got)
+	}
+	seen := map[string]bool{}
+	for _, node := range m.editorNodes {
+		if seen[node.id] {
+			t.Fatalf("duplicate id %q", node.id)
+		}
+		seen[node.id] = true
+	}
+}
+
+func TestPastingTwiceDoesNotStackTheCopies(t *testing.T) {
+	m := canvasModel()
+	m.place("Logger", 10, 4)
+	m.selectOnly(0)
+	m.copySelection()
+
+	m.pasteNearOriginal()
+	m.pasteNearOriginal()
+
+	if a, b := m.editorNodes[1], m.editorNodes[2]; a.x == b.x && a.y == b.y {
+		t.Fatalf("copies at the same spot: (%d, %d)", a.x, a.y)
+	}
+}
+
+func TestPasteFromTheMenuLandsWhereTheMenuOpened(t *testing.T) {
+	m := canvasModel()
+	m.place("Logger", 10, 4)
+	m.selectOnly(0)
+	m.copySelection()
+	p := [2]int{m.canvasRect.x + 70, m.canvasRect.y + 22}
+
+	next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+	got := next.(model)
+	x, y := got.toWorld(got.editorMenuX, got.editorMenuY)
+	got.runEditorAction(editorMenuItem{label: "Paste", action: editorActionPaste})
+
+	if pasted := got.editorNodes[1]; pasted.x != x || pasted.y != y {
+		t.Fatalf("pasted at (%d, %d), want (%d, %d)", pasted.x, pasted.y, x, y)
+	}
+}
+
+func TestStartIsNotCopied(t *testing.T) {
+	m := canvasModel()
+	m.place("Start", 4, 4)
+	m.place("Logger", 40, 4)
+	m.selectAllNodes()
+
+	m.copySelection()
+
+	if len(m.clipboardNodes) != 1 || m.clipboardNodes[0].kind != "Logger" {
+		t.Fatalf("clipboard = %+v", m.clipboardNodes)
+	}
+}
+
+func TestRightClickInsideASelectionKeepsIt(t *testing.T) {
+	m := canvasModel()
+	nodes := spreadNodes(&m)
+	m.setSelection([]int{0, 1})
+	p := m.bodyScreen(nodes[1])
+
+	next, _ := m.Update(tea.MouseClickMsg{X: p[0], Y: p[1], Button: tea.MouseRight})
+
+	if got := next.(model).selectedIndices(); len(got) != 2 {
+		t.Fatalf("selected = %v", got)
 	}
 }

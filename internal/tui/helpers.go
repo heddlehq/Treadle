@@ -8,6 +8,13 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 func clamp(value, minValue, maxValue int) int {
 	if value < minValue {
 		return minValue

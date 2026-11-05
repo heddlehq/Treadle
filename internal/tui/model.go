@@ -74,12 +74,20 @@ const (
 	editorActionEdit       editorAction = "edit"
 	editorActionConnect    editorAction = "connect"
 	editorActionBack       editorAction = "back"
+	editorActionUndo       editorAction = "undo"
+	editorActionRedo       editorAction = "redo"
+	editorActionCopy       editorAction = "copy"
+	editorActionPaste      editorAction = "paste"
 )
 
 type editorMenuItem struct {
-	label  string
-	action editorAction
-	kind   string
+	label     string
+	shortcut  string
+	action    editorAction
+	kind      string
+	disabled  bool
+	danger    bool
+	separator bool
 }
 
 type editorNode struct {
@@ -100,9 +108,15 @@ type editorNode struct {
 }
 
 type nodeControl struct {
-	name  string
-	label string
-	value string
+	name    string
+	label   string
+	value   string
+	kind    string
+	options []controlOption
+
+	// Saved with the node but not part of its form, like what the web editor keeps
+	// for itself in every node.
+	hidden bool
 }
 
 type editorConnection struct {
@@ -140,6 +154,7 @@ type model struct {
 	hostInput     textinput.Model
 	apiKeyInput   textinput.Model
 	composerInput textinput.Model
+	modalInput    textinput.Model
 	aiPromptInput textinput.Model
 	spinner       spinner.Model
 
@@ -171,49 +186,56 @@ type model struct {
 	activities       []string
 	commandOutput    []string
 
-	editorWorkflowID    int
-	editorWorkflowName  string
-	editorNodes         []editorNode
-	editorConnections   []editorConnection
-	editorDirty         bool
-	editorSaving        bool
-	editorStatusMessage string
-	selectedNode        int
-	draggingNode        int
-	dragAnchorX         int
-	dragAnchorY         int
-	dragOrigins         map[string]canvasPoint
-	extraSelection      map[string]bool
-	viewX               int
-	viewY               int
-	zoomIndex           int
-	panning             bool
-	panLastX            int
-	panLastY            int
-	marqueeActive       bool
-	marqueeAdditive     bool
-	marqueeStartX       int
-	marqueeStartY       int
-	marqueeX            int
-	marqueeY            int
-	connectSource       int
-	connectOutput       int
-	wireActive          bool
-	wireX               int
-	wireY               int
-	paletteIndex        int
-	editorMode          editorMode
-	editorOverlay       editorOverlay
-	editorMenuX         int
-	editorMenuY         int
-	editorMenuSelected  int
-	editorMenuTarget    int
-	editorCreateAtMenu  bool
-	aiChatMessages      []string
-	aiChatScroll        int
-	modalFocusedControl int
-	modalDraft          []nodeControl
-	nodeRects           map[string]rect
+	editorWorkflowID     int
+	editorWorkflowName   string
+	editorNodes          []editorNode
+	editorConnections    []editorConnection
+	editorDirty          bool
+	editorSaving         bool
+	editorStatusMessage  string
+	selectedNode         int
+	draggingNode         int
+	dragAnchorX          int
+	dragAnchorY          int
+	dragOrigins          map[string]canvasPoint
+	extraSelection       map[string]bool
+	selectedConnection   int
+	undoStack            []editorSnapshot
+	redoStack            []editorSnapshot
+	clipboardNodes       []editorNode
+	clipboardConnections []editorConnection
+	pasteCount           int
+	dragMoved            bool
+	viewX                int
+	viewY                int
+	zoomIndex            int
+	panning              bool
+	panLastX             int
+	panLastY             int
+	marqueeActive        bool
+	marqueeAdditive      bool
+	marqueeStartX        int
+	marqueeStartY        int
+	marqueeX             int
+	marqueeY             int
+	connectSource        int
+	connectOutput        int
+	wireActive           bool
+	wireX                int
+	wireY                int
+	paletteIndex         int
+	editorMode           editorMode
+	editorOverlay        editorOverlay
+	editorMenuX          int
+	editorMenuY          int
+	editorMenuSelected   int
+	editorMenuTarget     int
+	editorCreateAtMenu   bool
+	aiChatMessages       []string
+	aiChatScroll         int
+	modalFocusedControl  int
+	modalDraft           []nodeControl
+	nodeRects            map[string]rect
 
 	connectLayout      connectLayout
 	sidebarRect        rect
@@ -227,7 +249,6 @@ type model struct {
 	aiPromptInputRect  rect
 	paletteRect        rect
 	inspectorRect      rect
-	modalRect          rect
 	footerRect         rect
 }
 
@@ -260,6 +281,12 @@ func initialModel() model {
 	composerInput.SetVirtualCursor(true)
 	composerInput.SetStyles(textInputStyles())
 
+	modalInput := textinput.New()
+	modalInput.SetWidth(0)
+	modalInput.Prompt = ""
+	modalInput.SetVirtualCursor(true)
+	modalInput.SetStyles(textInputStyles())
+
 	aiPromptInput := textinput.New()
 	aiPromptInput.SetWidth(0)
 	aiPromptInput.CharLimit = 512
@@ -289,6 +316,7 @@ func initialModel() model {
 		hostInput:     hostInput,
 		apiKeyInput:   apiKeyInput,
 		composerInput: composerInput,
+		modalInput:    modalInput,
 		aiPromptInput: aiPromptInput,
 		spinner:       sp,
 		aiChatMessages: []string{
@@ -299,14 +327,15 @@ func initialModel() model {
 			"You: Adiciona também validação de dados",
 			"Agent: Nó de validação adicionado entre o CSV e o banco. Use o inspector para definir as regras.",
 		},
-		terminalFocused:  true,
-		selectedNode:     -1,
-		zoomIndex:        defaultZoomIndex,
-		draggingNode:     -1,
-		connectSource:    -1,
-		editorMenuTarget: -1,
-		editorMode:       editorModeNormal,
-		nodeRects:        map[string]rect{},
+		terminalFocused:    true,
+		selectedNode:       -1,
+		selectedConnection: -1,
+		zoomIndex:          defaultZoomIndex,
+		draggingNode:       -1,
+		connectSource:      -1,
+		editorMenuTarget:   -1,
+		editorMode:         editorModeNormal,
+		nodeRects:          map[string]rect{},
 	}
 }
 
