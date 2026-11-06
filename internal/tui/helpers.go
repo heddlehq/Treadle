@@ -185,6 +185,14 @@ func (m *model) appendActivity(line string) {
 func mapIconToTerminal(iconName string) string {
 	iconName = strings.ToLower(iconName)
 	switch {
+	case strings.Contains(iconName, "bolt"):
+		return "↗"
+	case strings.Contains(iconName, "share"):
+		return "↔"
+	case strings.Contains(iconName, "flag"):
+		return "✓"
+	case strings.Contains(iconName, "document"):
+		return "≡"
 	case strings.Contains(iconName, "play") || strings.Contains(iconName, "start"):
 		return "▶"
 	case strings.Contains(iconName, "link") || strings.Contains(iconName, "hook"):

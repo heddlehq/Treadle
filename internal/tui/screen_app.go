@@ -470,6 +470,8 @@ func (m model) handleWorkflowLoaded(msg workflowLoadedMsg) (tea.Model, tea.Cmd) 
 
 func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	m.editorSaving = false
+	runAfterSave := m.editorRunAfterSave
+	m.editorRunAfterSave = false
 	if msg.err != nil {
 		m.editorStatusMessage = "Save failed: " + truncatePlain(msg.err.Error(), 40)
 		m.appendActivity("Failed to save workflow: " + truncatePlain(msg.err.Error(), 56))
@@ -485,13 +487,17 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	m.appendActivity("Saved workflow: " + m.editorWorkflowName)
 
 	reload := loadWorkflowsCmd(m.activeHost, m.activeAPIKey)
+	var run tea.Cmd
+	if runAfterSave {
+		run = m.startExecution()
+	}
 	if !m.agentWaitingForSave {
-		return m, reload
+		return m, tea.Batch(reload, run)
 	}
 
 	m.agentWaitingForSave = false
 	next, ask := m.askAgent()
-	return next, tea.Batch(reload, ask)
+	return next, tea.Batch(reload, run, ask)
 }
 
 func (m model) selectedWorkflowItem() (workflow, bool) {

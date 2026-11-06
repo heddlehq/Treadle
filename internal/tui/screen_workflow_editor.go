@@ -21,6 +21,7 @@ func (m *model) beginWorkflowEditor(name string) {
 	m.editorWorkflowName = fallbackString(name, defaultWorkflowName)
 	m.editorDirty = false
 	m.editorSaving = false
+	m.forgetExecution()
 	m.editorStatusMessage = ""
 	m.editorMode = editorModeNormal
 	m.selectOnly(0)
@@ -236,6 +237,9 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorMode == editorModeModal {
 		return m.updateNodeModalKey(msg)
 	}
+	if m.editorOverlay == editorOverlayResult {
+		return m.updateExecutionResultKey(msg), nil
+	}
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
 	}
@@ -286,6 +290,8 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		return m, nil
 	case "ctrl+s":
 		return m, m.saveCurrentWorkflow()
+	case "ctrl+r":
+		return m, m.runCurrentWorkflow()
 	case "ctrl+a":
 		m.selectAllNodes()
 		return m, nil
@@ -341,6 +347,8 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "a":
 		m.editorMode = editorModeAdd
+	case "o":
+		m.openExecutionResult()
 	case "c":
 		if m.editorMode == editorModeConnect {
 			m.cycleConnectOutput()
@@ -357,6 +365,9 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 func (m model) renderWorkflowEditor() string {
 	if m.editorMode == editorModeModal {
 		return m.renderNodeModal()
+	}
+	if m.editorOverlay == editorOverlayResult {
+		return m.renderExecutionResult()
 	}
 	if m.editorOverlay == editorOverlayCommand || m.editorOverlay == editorOverlayCreate {
 		return m.renderWorkflowCommandPalette()
@@ -451,7 +462,11 @@ func (m model) renderWorkflowTopBar() []string {
 	case m.editorDirty:
 		save = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("Save")
 	}
-	right := save + "  "
+	run := lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("Run")
+	if m.runBusy() {
+		run = muted.Bold(true).Render(runningLabel)
+	}
+	right := run + "   " + save + "  "
 	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-8, 8)); status != "" {
 		right = status + "    " + right
 	}
@@ -473,8 +488,11 @@ func (m model) renderEditorStatus(width int) string {
 	switch {
 	case strings.HasPrefix(message, "Unsaved"):
 		statusColor = warmColor
-	case strings.HasPrefix(message, "Save failed"), strings.HasPrefix(message, "Missing"), strings.HasPrefix(message, "Can't"):
+	case strings.HasPrefix(message, "Save failed"), strings.HasPrefix(message, "Missing"), strings.HasPrefix(message, "Can't"),
+		strings.HasPrefix(message, "Execution failed"):
 		statusColor = errorColor
+	case strings.HasPrefix(message, "Execution finished"):
+		statusColor = successColor
 	}
 	return lipgloss.NewStyle().Foreground(statusColor).Render("● " + truncatePlain(message, width))
 }
@@ -489,7 +507,7 @@ func (m model) workflowFooterText() string {
 	if m.aiPromptInput.Focused() {
 		return "⏎ send  esc close"
 	}
-	return m.agentHint() + "  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  esc back"
+	return m.agentHint() + "  c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  ctrl+r run  esc back"
 }
 
 // agentHint is also how a reply reaches someone who closed the bar.
@@ -501,6 +519,20 @@ func (m model) agentHint() string {
 		return "/ agent replied"
 	}
 	return "/ agent"
+}
+
+func (m model) runBusy() bool {
+	return m.editorRunInFlight || m.editorRunAfterSave
+}
+
+// workflowRunButtonRect sits to the left of Save, the way the top bar draws it.
+func (m model) workflowRunButtonRect() rect {
+	label := "Run"
+	if m.runBusy() {
+		label = runningLabel
+	}
+	width := lipgloss.Width(label)
+	return rect{x: max(m.workflowSaveButtonRect().x-3-width, 0), y: 0, w: width, h: 1}
 }
 
 func (m model) workflowSaveButtonRect() rect {
@@ -701,6 +733,10 @@ func (m model) renderWorkflowCommandPalette() string {
 
 func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 	x, y := mouse.X, mouse.Y
+	if m.editorOverlay == editorOverlayResult {
+		m.closeEditorOverlay()
+		return m, nil
+	}
 	if m.editorOverlay != editorOverlayNone {
 		m.handleEditorOverlayClick(x, y)
 		return m, nil
@@ -708,6 +744,9 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 
 	if inside(x, y, m.workflowSaveButtonRect()) {
 		return m, m.saveCurrentWorkflow()
+	}
+	if m.editorMode != editorModeModal && inside(x, y, m.workflowRunButtonRect()) {
+		return m, m.runCurrentWorkflow()
 	}
 
 	if m.editorMode == editorModeModal {
@@ -777,6 +816,14 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 }
 
 func (m *model) handleWorkflowEditorWheel(mouse tea.Mouse) {
+	if m.editorOverlay == editorOverlayResult {
+		if mouse.Button == tea.MouseWheelUp {
+			m.scrollExecutionResult(-1)
+		} else {
+			m.scrollExecutionResult(1)
+		}
+		return
+	}
 	if inside(mouse.X, mouse.Y, m.canvasRect) {
 		m.handleCanvasWheel(mouse)
 		return
@@ -808,6 +855,9 @@ func (m model) updateAIBuilderInput(msg tea.KeyPressMsg) (model, tea.Cmd) {
 }
 
 func (m *model) openWorkflowContextMenu(x, y int) {
+	if m.editorOverlay == editorOverlayResult {
+		return
+	}
 	if m.editorMode == editorModeModal {
 		return
 	}

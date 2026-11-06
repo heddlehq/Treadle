@@ -65,6 +65,7 @@ const (
 	editorOverlayContext editorOverlay = "context"
 	editorOverlayCommand editorOverlay = "command"
 	editorOverlayCreate  editorOverlay = "create"
+	editorOverlayResult  editorOverlay = "result"
 )
 
 type editorAction string
@@ -194,6 +195,12 @@ type model struct {
 	editorConnections    []editorConnection
 	editorDirty          bool
 	editorSaving         bool
+	editorRunAfterSave   bool
+	editorRunInFlight    bool
+	editorExecution      *apiExecution
+	editorPollFailures   int
+	editorResultScroll   int
+	editorResultFull     bool
 	editorStatusMessage  string
 	selectedNode         int
 	draggingNode         int

@@ -61,6 +61,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAgentRunStarted(msg)
 	case agentFlowLoadedMsg:
 		return m.handleAgentFlowLoaded(msg)
+	case executionStartedMsg:
+		return m.handleExecutionStarted(msg)
+	case executionPolledMsg:
+		return m.handleExecutionPolled(msg)
 	}
 
 	var cmds []tea.Cmd

@@ -46,7 +46,7 @@ jobs:
         include:
           - { target: linux-x64, runner: ubuntu-22.04 }
           - { target: linux-arm64, runner: ubuntu-22.04-arm }
-          - { target: macos-arm64, runner: macos-14 }
+          - { target: macos-arm64, runner: macos-15 }
           - { target: windows-x64, runner: windows-2022 }
 
     defaults:
