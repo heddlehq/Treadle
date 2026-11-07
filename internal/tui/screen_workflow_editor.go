@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"treadle/internal/agent"
 )
 
 // paletteChrome is what a palette takes besides its items: border, title and hints.
@@ -264,13 +266,18 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
 	}
-	if m.agentRunRequest != nil {
+	if m.agentTranscript.Permission != nil {
 		switch msg.String() {
 		case "y":
-			return m.decideAgentRun(true)
+			return m.decideAgentRun(agent.DecideOnce)
+		case "a":
+			return m.decideAgentRun(agent.DecideAlways)
 		case "n", "esc":
-			return m.decideAgentRun(false)
+			return m.decideAgentRun(agent.DecideDeny)
 		}
+	}
+	if m.agentBusy && msg.String() == "ctrl+x" {
+		return m.stopAgent()
 	}
 	if m.aiPromptInput.Focused() {
 		return m.updateAIBuilderInput(msg)
@@ -674,10 +681,13 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	if m.agentRunRequest != nil {
-		return "y run  n don't run"
+	if m.agentTranscript.Permission != nil {
+		return "y run  a always in this chat  n don't run"
 	}
 	if m.aiPromptInput.Focused() {
+		if m.agentBusy {
+			return "ctrl+x stop  tab next panel  esc close"
+		}
 		return "⏎ send  tab next panel  esc close"
 	}
 	if m.editorMode == editorModeAdd {

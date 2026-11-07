@@ -9,7 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"treadle/internal/mcp"
+	"treadle/internal/agent"
 )
 
 const (
@@ -246,18 +246,17 @@ type model struct {
 	editorMenuSelected   int
 	editorMenuTarget     int
 	editorCreateAtMenu   bool
-	aiChatMessages       []string
+	agentTranscript      agent.Transcript
 	aiChatScroll         int
 	aiChatOpen           bool
 	agentUnread          bool
-	agentClient          *mcp.Client
-	agentRun             int
-	agentCancel          context.CancelFunc
+	agentFollowing       int
+	agentStopFollowing   context.CancelFunc
 	agentBusy            bool
+	agentSending         bool
 	agentWaitingForSave  bool
+	agentPrompt          string
 	agentQueuedPrompt    string
-	agentRunRequest      *agentRunRequest
-	agentTurns           []chatTurn
 	modalFocusedControl  int
 	modalDraft           []nodeControl
 	nodeRects            map[string]rect

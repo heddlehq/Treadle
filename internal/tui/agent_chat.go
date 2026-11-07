@@ -14,16 +14,17 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"treadle/internal/mcp"
+	"treadle/internal/agent"
 )
 
 const (
 	agentMessagePrefix = "Agent: "
 	userMessagePrefix  = "You: "
 
-	// The server thinks and calls its tools before it answers, and a confirmation can
-	// keep it waiting.
-	agentTimeout = 7 * time.Minute
+	// Only for the requests that send something: answers come through the stream.
+	agentRequestTimeout = 30 * time.Second
+
+	agentReconnectDelay = time.Second
 
 	// The rule on top and the input.
 	aiChatChromeHeight = 2
@@ -31,34 +32,17 @@ const (
 	minCanvasHeightWithChat = 5
 )
 
-// chatTurn is one message of the conversation. Heddle keeps no history: all of it goes
-// with every message.
-type chatTurn struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+// agentStreamMsg is something new in the conversation of flowID.
+type agentStreamMsg struct {
+	flowID int
+	update agent.Update
+	err    error
+	next   tea.Cmd
 }
 
-type agentRunRequest struct {
-	FlowID int            `json:"flow_id"`
-	Name   string         `json:"name"`
-	Input  map[string]any `json:"input"`
-}
-
-type agentReply struct {
-	Reply      string           `json:"reply"`
-	RunRequest *agentRunRequest `json:"run_request"`
-}
-
-type agentReplyMsg struct {
-	run   int
-	reply agentReply
-	err   error
-}
-
-type agentRunStartedMsg struct {
-	run         int
-	executionID string
-	err         error
+type agentSentMsg struct {
+	flowID int
+	err    error
 }
 
 type agentFlowLoadedMsg struct {
@@ -74,18 +58,78 @@ func reloadAfterAgentCmd(host, apiKey string, workflowID int) tea.Cmd {
 	}
 }
 
-// mcpClient reuses the connection for as long as the login stays the same.
-func (m *model) mcpClient() (*mcp.Client, error) {
+func (m model) agentAPI() (*agent.Client, error) {
 	baseURL, err := normalizeBaseURL(m.activeHost)
 	if err != nil {
 		return nil, err
 	}
+	return &agent.Client{BaseURL: baseURL, Token: m.activeAPIKey}, nil
+}
 
-	url := baseURL + "/mcp"
-	if m.agentClient == nil || m.agentClient.URL != url || m.agentClient.Token != m.activeAPIKey {
-		m.agentClient = &mcp.Client{URL: url, Token: m.activeAPIKey}
+// followAgent keeps reading the conversation of the open flow, reconnecting if the
+// connection drops. It lives on the server, so this also picks up work in progress.
+func (m *model) followAgent() tea.Cmd {
+	flowID := m.editorWorkflowID
+	if flowID == 0 || m.agentFollowing == flowID {
+		return nil
 	}
-	return m.agentClient, nil
+
+	client, err := m.agentAPI()
+	if err != nil {
+		return nil
+	}
+
+	if m.agentStopFollowing != nil {
+		m.agentStopFollowing()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.agentStopFollowing = cancel
+	m.agentFollowing = flowID
+
+	updates := make(chan agentStreamMsg)
+	go streamAgent(ctx, client, flowID, updates)
+	return waitForAgent(updates)
+}
+
+func streamAgent(ctx context.Context, client *agent.Client, flowID int, updates chan<- agentStreamMsg) {
+	defer close(updates)
+
+	// Opening a flow starts a new chat, like the web editor. The server keeps the old one,
+	// and stays in it while the agent is working.
+	_ = client.New(ctx, flowID)
+
+	deliver := func(msg agentStreamMsg) {
+		select {
+		case updates <- msg:
+		case <-ctx.Done():
+		}
+	}
+
+	for ctx.Err() == nil {
+		err := client.Follow(ctx, flowID, func(update agent.Update) {
+			deliver(agentStreamMsg{flowID: flowID, update: update})
+		})
+		if errors.Is(err, agent.ErrUnauthorized) {
+			deliver(agentStreamMsg{flowID: flowID, err: err})
+			return
+		}
+
+		select {
+		case <-time.After(agentReconnectDelay):
+		case <-ctx.Done():
+		}
+	}
+}
+
+func waitForAgent(updates <-chan agentStreamMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-updates
+		if !ok {
+			return nil
+		}
+		msg.next = waitForAgent(updates)
+		return msg
+	}
 }
 
 // askFromList takes a message from the workflow list to the editor, about the selected
@@ -119,13 +163,12 @@ func (m model) sendQueuedPrompt() (model, tea.Cmd) {
 // so what is only on this canvas is saved first.
 func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
 	prompt := strings.TrimSpace(m.aiPromptInput.Value())
-	if prompt == "" || m.agentBusy || m.agentRunRequest != nil {
+	if prompt == "" || m.agentBusy || m.agentTranscript.Permission != nil {
 		return m, nil
 	}
 
 	m.aiPromptInput.SetValue("")
-	m.appendChat(userMessagePrefix + prompt)
-	m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: prompt})
+	m.agentPrompt = prompt
 	m.agentBusy = true
 
 	if m.editorDirty || m.editorWorkflowID == 0 {
@@ -143,81 +186,97 @@ func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
 func (m *model) abortPendingAgent() {
 	m.agentWaitingForSave = false
 	m.agentBusy = false
-	m.agentTurns = m.agentTurns[:max(len(m.agentTurns)-1, 0)]
-	m.appendChat(agentMessagePrefix + "The flow couldn't be saved, so nothing was sent.")
+	m.agentPrompt = ""
+	m.noteChat("The flow couldn't be saved, so nothing was sent.")
 }
 
-// askAgent sends the conversation to the chat tool of the server.
+// askAgent hands the message to the server, which answers through the stream.
 func (m model) askAgent() (model, tea.Cmd) {
-	client, err := m.mcpClient()
+	client, err := m.agentAPI()
 	if err != nil {
 		m.agentBusy = false
-		m.appendChat(agentMessagePrefix + err.Error())
+		m.noteChat(err.Error())
 		return m, nil
 	}
 
-	arguments := map[string]any{"messages": append([]chatTurn{}, m.agentTurns...)}
-	if m.editorWorkflowID != 0 {
-		arguments["flow_id"] = fmt.Sprint(m.editorWorkflowID)
+	flowID, prompt := m.editorWorkflowID, m.agentPrompt
+	m.agentPrompt = ""
+	m.agentSending = true
+	follow := m.followAgent()
+
+	send := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), agentRequestTimeout)
+		defer cancel()
+		return agentSentMsg{flowID: flowID, err: client.Send(ctx, flowID, prompt)}
 	}
-
-	m.agentRun++
-	run := m.agentRun
-	ctx := m.agentContext()
-
-	return m, func() tea.Msg {
-		text, err := client.Call(ctx, "chat", arguments)
-		if err != nil {
-			return agentReplyMsg{run: run, err: err}
-		}
-
-		var reply agentReply
-		if err := json.Unmarshal([]byte(text), &reply); err != nil {
-			return agentReplyMsg{run: run, err: fmt.Errorf("invalid reply: %w", err)}
-		}
-		return agentReplyMsg{run: run, reply: reply}
-	}
+	return m, tea.Batch(follow, send)
 }
 
-func (m *model) agentContext() context.Context {
-	if m.agentCancel != nil {
-		m.agentCancel()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout)
-	m.agentCancel = cancel
-	return ctx
-}
-
-func (m model) handleAgentReply(msg agentReplyMsg) (tea.Model, tea.Cmd) {
-	// From a conversation that is already over.
-	if msg.run != m.agentRun {
+func (m model) handleAgentSent(msg agentSentMsg) (tea.Model, tea.Cmd) {
+	if msg.flowID != m.editorWorkflowID {
 		return m, nil
 	}
-	m.agentBusy = false
+	m.agentSending = false
 
 	if msg.err != nil {
-		if errors.Is(msg.err, mcp.ErrUnauthorized) {
+		if errors.Is(msg.err, agent.ErrUnauthorized) {
 			return m.returnToConnect()
 		}
-		m.agentTurns = m.agentTurns[:max(len(m.agentTurns)-1, 0)]
-		m.appendChat(agentMessagePrefix + msg.err.Error())
+		m.agentBusy = false
+		m.noteChat(msg.err.Error())
+	}
+	return m, nil
+}
+
+func (m model) handleAgentStream(msg agentStreamMsg) (tea.Model, tea.Cmd) {
+	// From a flow that is no longer open.
+	if msg.flowID != m.agentFollowing {
 		return m, nil
 	}
-
-	m.agentTurns = append(m.agentTurns, chatTurn{Role: "assistant", Content: msg.reply.Reply})
-	if msg.reply.Reply != "" {
-		m.appendChat(agentMessagePrefix + msg.reply.Reply)
+	if msg.err != nil {
+		return m.returnToConnect()
 	}
 
-	if msg.reply.RunRequest != nil {
-		m.agentRunRequest = msg.reply.RunRequest
-		m.aiChatOpen = true
-		m.agentUnread = false
-		m.appendChat(agentMessagePrefix + fmt.Sprintf(
-			"Run %q? It can have real side effects. [y] run  [n] don't run", msg.reply.RunRequest.Name))
+	var reload tea.Cmd
+	if msg.update.Snapshot != nil {
+		m.agentTranscript = *msg.update.Snapshot
+		m.agentBusy = m.agentTranscript.Status == agent.StatusRunning || m.agentSending
+	} else if event := msg.update.Event; event != nil {
+		m.agentTranscript.Apply(*event)
+		m, reload = m.afterAgentEvent(*event)
 	}
 
-	return m.reloadAfterAgent()
+	m.reflow()
+	m.scrollAIChatToEnd()
+	return m, tea.Batch(reload, msg.next)
+}
+
+func (m model) afterAgentEvent(event agent.Event) (model, tea.Cmd) {
+	switch event.Type {
+	case "status":
+		m.agentBusy = event.Status == agent.StatusRunning
+		m.agentUnread = event.Status == agent.StatusIdle && !m.aiChatOpen
+	case "permission":
+		// Nobody can answer what they can't see.
+		if event.Permission != nil {
+			m.aiChatOpen = true
+			m.agentUnread = false
+		}
+	case "tool_finished":
+		if m.agentChangedTheFlow(event.ID) {
+			return m.reloadAfterAgent()
+		}
+	}
+	return m, nil
+}
+
+func (m model) agentChangedTheFlow(toolID string) bool {
+	for _, item := range m.agentTranscript.Items {
+		if item.ID == toolID {
+			return item.Name == "update_flow" && item.Status == agent.ToolOK
+		}
+	}
+	return false
 }
 
 func (m model) reloadAfterAgent() (model, tea.Cmd) {
@@ -231,68 +290,37 @@ func (m model) reloadAfterAgent() (model, tea.Cmd) {
 	return m, reloadAfterAgentCmd(m.activeHost, m.activeAPIKey, m.editorWorkflowID)
 }
 
-// decideAgentRun answers the question. The server never runs a flow from the chat:
-// that only happens here, with a call a person asked for.
-func (m model) decideAgentRun(approved bool) (model, tea.Cmd) {
-	request := m.agentRunRequest
-	m.agentRunRequest = nil
-
-	if !approved {
-		m.appendChat(userMessagePrefix + "Don't run it.")
-		m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: "Don't run it."})
-		return m, nil
-	}
-
-	m.appendChat(userMessagePrefix + "Run it.")
-	m.agentTurns = append(m.agentTurns, chatTurn{Role: "user", Content: "Run it."})
-
-	client, err := m.mcpClient()
+// decideAgentRun answers the question. The run happens on the server, once it has this.
+func (m model) decideAgentRun(decision string) (model, tea.Cmd) {
+	client, err := m.agentAPI()
 	if err != nil {
-		m.appendChat(agentMessagePrefix + err.Error())
+		m.noteChat(err.Error())
 		return m, nil
 	}
 
-	arguments := map[string]any{"flow_id": fmt.Sprint(request.FlowID)}
-	if request.Input != nil {
-		arguments["input"] = request.Input
-	}
-
-	m.agentBusy = true
-	m.agentRun++
-	run := m.agentRun
-	ctx := m.agentContext()
+	flowID := m.editorWorkflowID
+	m.agentTranscript.Permission = nil
 
 	return m, func() tea.Msg {
-		text, err := client.Call(ctx, "run_flow", arguments)
-		if err != nil {
-			return agentRunStartedMsg{run: run, err: err}
-		}
-
-		var execution struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal([]byte(text), &execution); err != nil {
-			return agentRunStartedMsg{run: run, err: fmt.Errorf("invalid reply: %w", err)}
-		}
-		return agentRunStartedMsg{run: run, executionID: execution.ID}
+		ctx, cancel := context.WithTimeout(context.Background(), agentRequestTimeout)
+		defer cancel()
+		return agentSentMsg{flowID: flowID, err: client.Decide(ctx, flowID, decision)}
 	}
 }
 
-func (m model) handleAgentRunStarted(msg agentRunStartedMsg) (tea.Model, tea.Cmd) {
-	if msg.run != m.agentRun {
+// stopAgent ends what the agent is doing, on the server.
+func (m model) stopAgent() (model, tea.Cmd) {
+	client, err := m.agentAPI()
+	if err != nil {
 		return m, nil
 	}
-	m.agentBusy = false
 
-	text := "The flow couldn't start: "
-	if msg.err != nil {
-		text += msg.err.Error()
-	} else {
-		text = "Started execution " + msg.executionID + "."
+	flowID := m.editorWorkflowID
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), agentRequestTimeout)
+		defer cancel()
+		return agentSentMsg{flowID: flowID, err: client.Stop(ctx, flowID)}
 	}
-	m.agentTurns = append(m.agentTurns, chatTurn{Role: "assistant", Content: text})
-	m.appendChat(agentMessagePrefix + text)
-	return m, nil
 }
 
 // handleAgentFlowLoaded brings in what the agent saved, keeping the view where it is.
@@ -352,7 +380,8 @@ func (m model) openAIChat() (model, tea.Cmd) {
 	}
 	m.agentUnread = false
 	m.scrollAIChatToEnd()
-	return m, m.aiPromptInput.Focus()
+	follow := m.followAgent()
+	return m, tea.Batch(m.aiPromptInput.Focus(), follow)
 }
 
 func (m model) closeAIChat() model {
@@ -363,26 +392,26 @@ func (m model) closeAIChat() model {
 }
 
 func (m *model) resetAgentChat() {
-	if m.agentCancel != nil {
-		m.agentCancel()
-		m.agentCancel = nil
+	if m.agentStopFollowing != nil {
+		m.agentStopFollowing()
+		m.agentStopFollowing = nil
 	}
-	m.agentRun++
+	m.agentFollowing = 0
 	m.agentBusy = false
+	m.agentSending = false
 	m.agentWaitingForSave = false
-	m.agentRunRequest = nil
+	m.agentPrompt = ""
 	m.agentUnread = false
-	m.agentTurns = nil
-	m.aiChatMessages = nil
+	m.agentTranscript = agent.Transcript{}
 	m.aiChatScroll = 0
 	m.aiChatOpen = false
 	m.aiPromptInput.Blur()
 	m.reflow()
 }
 
-func (m *model) appendChat(message string) {
-	m.aiChatMessages = append(m.aiChatMessages, message)
-	m.agentUnread = !m.aiChatOpen
+// noteChat shows something that happened here, which the server doesn't know about.
+func (m *model) noteChat(message string) {
+	m.agentTranscript.Apply(agent.Event{Type: "failed", Message: message})
 	m.reflow()
 	m.scrollAIChatToEnd()
 }
@@ -412,17 +441,88 @@ func (m model) aiChatLines(width int) []string {
 	userLabel := lipgloss.NewStyle().Foreground(successColor).Render("You") + muted.Render(": ")
 
 	var lines []string
-	for _, message := range m.aiChatMessages {
-		switch {
-		case strings.HasPrefix(message, userMessagePrefix):
-			lines = append(lines, labeledLines(userLabel, message[len(userMessagePrefix):], len(userMessagePrefix), width)...)
-		case strings.HasPrefix(message, agentMessagePrefix):
-			lines = append(lines, labeledLines(agentLabel, message[len(agentMessagePrefix):], len(agentMessagePrefix), width)...)
+	for _, item := range m.agentTranscript.Items {
+		switch item.Role {
+		case agent.RoleUser:
+			lines = append(lines, labeledLines(userLabel, item.Text, len(userMessagePrefix), width)...)
+		case agent.RoleAssistant:
+			lines = append(lines, labeledLines(agentLabel, item.Text, len(agentMessagePrefix), width)...)
+		case agent.RoleTool:
+			lines = append(lines, toolLine(item, width))
 		default:
-			lines = append(lines, wrapWords(message, width)...)
+			lines = append(lines, labeledLines(agentLabel, item.Text, len(agentMessagePrefix), width)...)
 		}
 	}
+
+	if permission := m.agentTranscript.Permission; permission != nil {
+		question := fmt.Sprintf("Run %q? It can have real side effects. [y] run  [a] always in this chat  [n] don't run", permission.FlowName)
+		lines = append(lines, labeledLines(agentLabel, question, len(agentMessagePrefix), width)...)
+	}
 	return lines
+}
+
+// toolLine is one call of the agent: what it is doing, and how that went.
+func toolLine(item agent.Item, width int) string {
+	mark, color := "◌", mutedTextColor
+	switch item.Status {
+	case agent.ToolOK:
+		mark, color = "✓", successColor
+	case agent.ToolFailed:
+		mark, color = "✗", errorColor
+	}
+
+	text := toolTitle(item.Name)
+	if summary := toolSummary(item); summary != "" {
+		text += " · " + summary
+	}
+
+	line := "  " + lipgloss.NewStyle().Foreground(color).Render(mark) + " "
+	return line + lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(text, max(width-4, 8)))
+}
+
+func toolTitle(name string) string {
+	switch name {
+	case "list_flows":
+		return "Listing flows"
+	case "get_flow":
+		return "Reading the flow"
+	case "list_nodes":
+		return "Checking the nodes"
+	case "list_executions":
+		return "Checking the runs"
+	case "get_execution":
+		return "Reading a run"
+	case "update_flow":
+		return "Changing the flow"
+	case "create_flow":
+		return "Creating a flow"
+	case "test_flow":
+		return "Testing the flow"
+	case "run_flow":
+		return "Running the flow"
+	}
+	return name
+}
+
+// toolSummary shows how a test ended, which is what matters about it.
+func toolSummary(item agent.Item) string {
+	if item.Name != "test_flow" || item.Output == "" {
+		return ""
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Error  struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(item.Output), &result) != nil {
+		return ""
+	}
+	if result.Error.Message != "" {
+		return strings.ReplaceAll(result.Error.Message, "\n", " ")
+	}
+	return result.Status
 }
 
 func labeledLines(label, text string, indent, width int) []string {
