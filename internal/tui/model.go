@@ -77,6 +77,7 @@ const (
 	editorActionEdit       editorAction = "edit"
 	editorActionConnect    editorAction = "connect"
 	editorActionBack       editorAction = "back"
+	editorActionAddComment editorAction = "add_comment"
 	editorActionUndo       editorAction = "undo"
 	editorActionRedo       editorAction = "redo"
 	editorActionCopy       editorAction = "copy"
@@ -108,6 +109,10 @@ type editorNode struct {
 	loaded    bool
 	loadedAt  canvasPoint
 	loadedPos apiPosition
+
+	// The size of a comment in the web editor, kept like loadedPos.
+	pxWidth  float64
+	pxHeight float64
 }
 
 type nodeControl struct {
@@ -233,6 +238,7 @@ type model struct {
 	wireX                int
 	wireY                int
 	paletteIndex         int
+	paletteScroll        int
 	editorMode           editorMode
 	editorOverlay        editorOverlay
 	editorMenuX          int

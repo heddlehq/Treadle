@@ -152,7 +152,7 @@ func categoryColor(category string) color.Color {
 		return warmColor
 	case strings.Contains(category, "data"):
 		return successColor
-	case strings.Contains(category, "code"), strings.Contains(category, "integration"):
+	case strings.Contains(category, "code"), strings.Contains(category, "http"), strings.Contains(category, "integration"):
 		return infoColor
 	default:
 		return mutedTextColor

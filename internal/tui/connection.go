@@ -17,8 +17,14 @@ import (
 // errUnauthorized means the server is reachable but refused the API key.
 var errUnauthorized = errors.New("unauthorized")
 
-type flowsResponse struct {
-	Data []apiFlow `json:"data"`
+// maxPerPage is the most items the API returns at once.
+const maxPerPage = 100
+
+type pageResponse[T any] struct {
+	Data []T `json:"data"`
+	Meta struct {
+		TotalPages int `json:"total_pages"`
+	} `json:"meta"`
 }
 
 type workflowResponse struct {
@@ -33,6 +39,7 @@ type workflowPayload struct {
 	Name        string              `json:"name"`
 	Nodes       []apiNode           `json:"nodes"`
 	Connections []apiSaveConnection `json:"connections"`
+	Comments    []apiComment        `json:"comments"`
 }
 
 type apiFlow struct {
@@ -42,6 +49,17 @@ type apiFlow struct {
 	InsertedAt  string          `json:"inserted_at"`
 	UpdatedAt   string          `json:"updated_at"`
 	Connections []apiConnection `json:"connections"`
+	Comments    []apiComment    `json:"comments"`
+}
+
+type apiComment struct {
+	ID       any         `json:"id"`
+	Kind     string      `json:"kind"`
+	Color    string      `json:"color"`
+	Text     string      `json:"text"`
+	Position apiPosition `json:"position"`
+	Width    float64     `json:"width"`
+	Height   float64     `json:"height"`
 }
 
 type apiNode struct {
@@ -69,10 +87,6 @@ type apiSaveConnection struct {
 	SourceOutput string `json:"sourceOutput"`
 	Target       any    `json:"target"`
 	TargetInput  string `json:"targetInput"`
-}
-
-type nodesResponse struct {
-	Data []apiNodeDef `json:"data"`
 }
 
 type apiNodeDef struct {
@@ -185,10 +199,29 @@ func normalizeBaseURL(server string) (string, error) {
 	return base, nil
 }
 
-func loadWorkflows(ctx context.Context, baseURL, apiKey string) ([]workflow, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/workflows", nil)
+// fetchAllPages walks a paginated list. The API stops at 20 items unless asked for
+// more, and 100 is the most it gives at once.
+func fetchAllPages[T any](ctx context.Context, baseURL, apiKey, resource string) ([]T, error) {
+	var items []T
+	for page := 1; ; page++ {
+		payload, err := fetchPage[T](ctx, baseURL, apiKey, resource, page)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, payload.Data...)
+		if page >= payload.Meta.TotalPages {
+			return items, nil
+		}
+	}
+}
+
+func fetchPage[T any](ctx context.Context, baseURL, apiKey, resource string, page int) (pageResponse[T], error) {
+	var payload pageResponse[T]
+
+	target := fmt.Sprintf("%s/api/v1/%s?page=%d&per_page=%d", baseURL, resource, page, maxPerPage)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, err
+		return payload, err
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -197,55 +230,40 @@ func loadWorkflows(ctx context.Context, baseURL, apiKey string) ([]workflow, err
 	client := &http.Client{Timeout: connectTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return payload, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, errUnauthorized
+		return payload, errUnauthorized
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("workflows api returned %s", resp.Status)
+		return payload, fmt.Errorf("%s api returned %s", resource, resp.Status)
 	}
 
-	var payload flowsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&payload)
+	return payload, err
+}
+
+func loadWorkflows(ctx context.Context, baseURL, apiKey string) ([]workflow, error) {
+	flows, err := fetchAllPages[apiFlow](ctx, baseURL, apiKey, "workflows")
+	if err != nil {
 		return nil, err
 	}
 
-	workflows := make([]workflow, 0, len(payload.Data))
-	for _, item := range payload.Data {
+	workflows := make([]workflow, 0, len(flows))
+	for _, item := range flows {
 		workflows = append(workflows, mapFlow(item))
 	}
 	return workflows, nil
 }
 
 func loadNodes(ctx context.Context, baseURL, apiKey string) ([]apiNodeDef, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/nodes", nil)
+	nodes, err := fetchAllPages[apiNodeDef](ctx, baseURL, apiKey, "nodes")
 	if err != nil {
 		return nil, err
 	}
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 
-	client := &http.Client{Timeout: connectTimeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nodes api returned %s", resp.Status)
-	}
-
-	var payload nodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-
-	nodes := payload.Data
 	// Group them properly, ignoring case for categories
 	for i := 0; i < len(nodes); i++ {
 		for j := i + 1; j < len(nodes); j++ {

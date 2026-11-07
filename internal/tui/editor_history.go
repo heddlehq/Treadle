@@ -260,10 +260,11 @@ func (m model) contextMenuItems() []editorMenuItem {
 		items = append(items, editorMenuItem{label: "Delete", shortcut: "del", action: editorActionDelete, danger: true})
 	}
 
-	if items[len(items)-1].separator {
-		return append(items, editorMenuItem{label: "Create node", action: editorActionOpenCreate})
+	if !items[len(items)-1].separator {
+		items = append(items, editorMenuItem{separator: true})
 	}
-	return append(items, editorMenuItem{separator: true}, editorMenuItem{label: "Create node", action: editorActionOpenCreate})
+	items = append(items, editorMenuItem{label: "Create node", shortcut: "a", action: editorActionOpenCreate})
+	return append(items, commentMenuItems()...)
 }
 
 func (item editorMenuItem) selectable() bool {

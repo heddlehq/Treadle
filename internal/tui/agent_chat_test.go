@@ -40,7 +40,7 @@ func (s *fakeHeddle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
-		json.NewEncoder(w).Encode(flowsResponse{})
+		json.NewEncoder(w).Encode(pageResponse[apiFlow]{})
 		return
 	}
 

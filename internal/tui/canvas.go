@@ -51,11 +51,14 @@ func (m model) toWorld(x, y int) (int, int) {
 }
 
 // projectNode returns a node in the canvas grid. Height stays put, because each
-// output needs its own row.
+// output needs its own row. Comments have no outputs, so theirs scales too.
 func (m model) projectNode(node editorNode) editorNode {
 	node.x, node.y = m.toScreen(node.x, node.y)
 	if m.zoom() != 1 {
 		node.w = max(scaled(node.w, m.zoom()), minProjectedNode)
+		if node.isComment() {
+			node.h = max(scaled(node.h, m.zoom()), 1)
+		}
 	}
 	return node
 }
