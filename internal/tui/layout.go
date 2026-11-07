@@ -48,12 +48,23 @@ func (m *model) reflow() {
 	editorSidebarWidth := clamp(max(m.width/5, 22), 20, 30)
 	canvasWidth := max(m.width-editorSidebarWidth-sectionGapSize, 1)
 
+	canvasX := editorSidebarWidth + sectionGapSize
+	chatHeight := m.aiChatHeight(canvasWidth, editorBodyHeight)
+
 	m.paletteRect = rect{x: 0, y: editorBodyY, w: editorSidebarWidth, h: editorBodyHeight}
-	m.canvasRect = rect{x: editorSidebarWidth + sectionGapSize, y: editorBodyY, w: canvasWidth, h: editorBodyHeight}
+	m.canvasRect = rect{x: canvasX, y: editorBodyY, w: canvasWidth, h: editorBodyHeight - chatHeight}
 	m.inspectorRect = rect{x: 0, y: 0, w: 0, h: 0}
 	m.aiChatRect = rect{}
-	m.aiChatMessagesRect = rect{}
 	m.aiPromptInputRect = rect{}
+	if chatHeight > 0 {
+		m.aiChatRect = rect{x: canvasX, y: editorBodyY + m.canvasRect.h, w: canvasWidth, h: chatHeight}
+		m.aiPromptInputRect = rect{
+			x: canvasX + 2,
+			y: m.aiChatRect.y + chatHeight - 1,
+			w: max(canvasWidth-4, 1),
+			h: 1,
+		}
+	}
 
 	m.workflowListRect = rect{
 		x: m.sidebarRect.x,
@@ -74,9 +85,9 @@ func (m *model) reflow() {
 	m.apiKeyInput.CharLimit = max(m.connectLayout.key.w*4, 128)
 	m.composerInput.SetWidth(max(m.commandInputRect.w-3, 0))
 	m.composerInput.CharLimit = max(m.commandInputRect.w*4, 64)
-	m.aiPromptInput.SetWidth(max(m.aiPromptInputRect.w-3-lipgloss.Width(m.aiPromptInput.Prompt), 0))
-	m.aiPromptInput.CharLimit = max(m.aiPromptInputRect.w*6, 128)
-	m.aiChatScroll = clampScroll(m.aiChatScroll, len(m.aiChatMessages), max(m.aiChatMessagesRect.h, 1))
+	m.aiPromptInput.SetWidth(max(m.aiPromptInputRect.w-3, 0))
+	m.aiPromptInput.CharLimit = max(m.width*6, 512)
+	m.aiChatScroll = clampScroll(m.aiChatScroll, m.aiChatLineCount(), m.aiChatVisibleLines())
 
 	m.workflowScroll = clampScroll(m.workflowScroll, len(m.workflows)+1, max(m.workflowListRect.h, 1))
 	m.rebuildNodeRects()

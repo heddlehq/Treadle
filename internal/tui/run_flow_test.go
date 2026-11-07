@@ -63,7 +63,7 @@ func runModel(t *testing.T, stub *heddleStub) model {
 }
 
 // settle plays a command and the ones it leads to, the way the program would.
-func settle(t *testing.T, m model, cmd tea.Cmd) model {
+func playRun(t *testing.T, m model, cmd tea.Cmd) model {
 	t.Helper()
 	for range 20 {
 		if cmd == nil {
@@ -98,7 +98,7 @@ func TestRunningStartsAManualExecutionAndFollowsIt(t *testing.T) {
 	}}
 	m := runModel(t, stub)
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if stub.created["input"].(map[string]any)["trigger"] != "manual" {
 		t.Fatalf("input: %v", stub.created)
@@ -119,7 +119,7 @@ func TestRunningSavesPendingChangesFirst(t *testing.T) {
 	m := runModel(t, stub)
 	m.editorDirty = true
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if stub.saves == 0 {
 		t.Fatal("ran without saving")
@@ -146,7 +146,7 @@ func TestRunningANewWorkflowCreatesItFirst(t *testing.T) {
 	m := runModel(t, stub)
 	m.editorWorkflowID = 0
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if m.editorWorkflowID != 7 || !strings.HasPrefix(m.editorStatusMessage, "Execution finished") {
 		t.Fatalf("id %d, status %q", m.editorWorkflowID, m.editorStatusMessage)
@@ -167,7 +167,7 @@ func TestAFailedSaveDoesNotRun(t *testing.T) {
 	m.editorWorkflowID = 7
 	m.editorDirty = true
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if !strings.HasPrefix(m.editorStatusMessage, "Save failed") {
 		t.Fatalf("status: %q", m.editorStatusMessage)
@@ -184,7 +184,7 @@ func TestAFailedRunSaysSo(t *testing.T) {
 	}}}
 	m := runModel(t, stub)
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if !strings.HasPrefix(m.editorStatusMessage, "Execution failed") {
 		t.Fatalf("status: %q", m.editorStatusMessage)
@@ -209,7 +209,7 @@ func TestARunThatCannotStartSaysSo(t *testing.T) {
 	m.activeHost = server.URL
 	m.editorWorkflowID = 7
 
-	m = settle(t, m, m.runCurrentWorkflow())
+	m = playRun(t, m, m.runCurrentWorkflow())
 
 	if !strings.HasPrefix(m.editorStatusMessage, "Can't run") || m.editorRunInFlight {
 		t.Fatalf("status %q, in flight %v", m.editorStatusMessage, m.editorRunInFlight)

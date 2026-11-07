@@ -152,7 +152,7 @@ func categoryColor(category string) color.Color {
 		return warmColor
 	case strings.Contains(category, "data"):
 		return successColor
-	case strings.Contains(category, "code"), strings.Contains(category, "integration"):
+	case strings.Contains(category, "code"), strings.Contains(category, "http"), strings.Contains(category, "integration"):
 		return infoColor
 	default:
 		return mutedTextColor
@@ -214,41 +214,6 @@ func renderShadowRow(width, height int) string {
 		lines[i] = primary
 	}
 	return strings.Join(lines, "\n")
-}
-
-func renderInputBlock(val string, width int, focused bool) string {
-	borderColor := mutedTextColor
-	if focused {
-		borderColor = focusedBorderColor
-	}
-	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
-
-	b := lipgloss.RoundedBorder()
-	innerWidth := width - 2
-	if innerWidth < 1 {
-		innerWidth = 1
-	}
-
-	top := borderStyle.Render(b.TopLeft + strings.Repeat(b.Top, innerWidth) + b.TopRight)
-	bottom := borderStyle.Render(b.BottomLeft + strings.Repeat(b.Bottom, innerWidth) + b.BottomRight)
-
-	availWidth := innerWidth - 1
-	if availWidth < 0 {
-		availWidth = 0
-	}
-
-	paddedVal := lipgloss.NewStyle().
-		Inline(true).
-		MaxWidth(availWidth).
-		Width(availWidth).
-		Render(val)
-
-	midLeft := borderStyle.Render(b.Left) + " "
-	midRight := borderStyle.Render(b.Right)
-
-	middle := midLeft + paddedVal + midRight
-
-	return top + "\n" + middle + "\n" + bottom
 }
 
 func panelLine(width int, content string, align lipgloss.Position) string {

@@ -10,11 +10,22 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// paletteChrome is what a palette takes besides its items: border, title and hints.
+const paletteChrome = 7
+
+const (
+	// paletteHeader is the rows above the list in the node sidebar.
+	paletteHeader = 2
+	// paletteRevealMargin shows the heading above a node reached by going up.
+	paletteRevealMargin = 1
+)
+
 func (m *model) beginNewWorkflowEditor() {
 	m.beginWorkflowEditor(defaultWorkflowName)
 }
 
 func (m *model) beginWorkflowEditor(name string) {
+	m.resetAgentChat()
 	m.screen = screenWorkflowEditor
 	m.editorWorkflowID = 0
 	m.editorWorkflowName = fallbackString(name, defaultWorkflowName)
@@ -29,6 +40,7 @@ func (m *model) beginWorkflowEditor(name string) {
 	m.draggingNode = -1
 	m.connectSource = -1
 	m.paletteIndex = 0
+	m.paletteScroll = 0
 	m.editorOverlay = editorOverlayNone
 	m.editorMenuSelected = 0
 	m.editorMenuTarget = -1
@@ -64,12 +76,12 @@ func (m *model) beginWorkflowEditor(name string) {
 func (m *model) beginWorkflowEditorFromAPI(flow apiFlow) {
 	m.beginWorkflowEditor(fallbackString(flow.Name, defaultWorkflowName))
 	m.editorWorkflowID = flow.ID
-	if len(flow.Nodes) == 0 {
-		return
-	}
 
 	editorNodes, editorConnections := m.mapAPIFlowToEditor(flow)
-	if len(editorNodes) == 0 {
+	if len(flow.Nodes) == 0 {
+		// Saving sends every comment, so these can't be left out of the new flow.
+		m.editorNodes = append(m.editorNodes, editorNodes...)
+		m.rebuildNodeRects()
 		return
 	}
 
@@ -117,6 +129,10 @@ func (m model) mapAPIFlowToEditor(flow apiFlow) ([]editorNode, []editorConnectio
 		editorNodes = append(editorNodes, node)
 	}
 
+	for i, item := range flow.Comments {
+		editorNodes = append(editorNodes, commentFromAPI(item, i))
+	}
+
 	editorConnections := make([]editorConnection, 0, len(flow.Connections))
 	for _, conn := range flow.Connections {
 		source := apiRefString(conn.Source)
@@ -155,7 +171,12 @@ func (m *model) saveCurrentWorkflow() tea.Cmd {
 
 func (m model) workflowRequestPayload() workflowRequest {
 	nodes := make([]apiNode, 0, len(m.editorNodes))
+	comments := []apiComment{}
 	for _, node := range m.editorNodes {
+		if node.isComment() {
+			comments = append(comments, node.apiComment())
+			continue
+		}
 		nodes = append(nodes, apiNode{
 			ID:       node.id,
 			Type:     m.nodeTypeName(node.kind),
@@ -181,6 +202,7 @@ func (m model) workflowRequestPayload() workflowRequest {
 			Name:        m.editorWorkflowName,
 			Nodes:       nodes,
 			Connections: connections,
+			Comments:    comments,
 		},
 	}
 }
@@ -223,6 +245,11 @@ func (m model) updateWorkflowEditor(msg tea.Msg) (model, tea.Cmd) {
 			m.modalInput, cmd = m.modalInput.Update(msg)
 			return m, cmd
 		}
+		if m.aiPromptInput.Focused() {
+			var cmd tea.Cmd
+			m.aiPromptInput, cmd = m.aiPromptInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -237,11 +264,21 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	if m.editorOverlay != editorOverlayNone {
 		return m.updateEditorOverlayKey(msg), nil
 	}
+	if m.agentRunRequest != nil {
+		switch msg.String() {
+		case "y":
+			return m.decideAgentRun(true)
+		case "n", "esc":
+			return m.decideAgentRun(false)
+		}
+	}
 	if m.aiPromptInput.Focused() {
-		return m.updateAIBuilderInput(msg), nil
+		return m.updateAIBuilderInput(msg)
 	}
 
 	switch msg.String() {
+	case "/":
+		return m.openAIChat()
 	case "esc":
 		if m.editorMode == editorModeAdd || m.editorMode == editorModeConnect {
 			m.cancelConnection()
@@ -250,6 +287,9 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		if m.hasSelectedConnection() || len(m.selectedIndices()) > 1 {
 			m.clearSelection()
 			return m, nil
+		}
+		if m.aiChatOpen {
+			return m.closeAIChat(), nil
 		}
 		m.screen = screenApp
 		return m, nil
@@ -289,17 +329,36 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		m.fitView()
 		return m, nil
 	case "tab":
-		m.selectNextNode(1)
+		if m.editorMode == editorModeConnect {
+			m.selectNextNode(1)
+			return m, nil
+		}
+		return m.cycleEditorPanel(1)
 	case "shift+tab":
+		if m.editorMode == editorModeConnect {
+			m.selectNextNode(-1)
+			return m, nil
+		}
+		return m.cycleEditorPanel(-1)
+	case "]":
+		m.selectNextNode(1)
+	case "[":
 		m.selectNextNode(-1)
 	case "left":
-		m.moveSelectedEditorNode(-1, 0)
+		if m.editorMode != editorModeAdd {
+			m.moveSelectedEditorNode(-1, 0)
+		}
 	case "right":
+		if m.editorMode == editorModeAdd {
+			m.editorMode = editorModeNormal
+			return m, nil
+		}
 		m.moveSelectedEditorNode(1, 0)
 	case "up":
 		if m.editorMode == editorModeAdd {
 			nodes := m.getPaletteNodes()
 			m.paletteIndex = clamp(m.paletteIndex-1, 0, len(nodes)-1)
+			m.revealPaletteNode()
 			return m, nil
 		}
 		m.moveSelectedEditorNode(0, -1)
@@ -307,6 +366,7 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		if m.editorMode == editorModeAdd {
 			nodes := m.getPaletteNodes()
 			m.paletteIndex = clamp(m.paletteIndex+1, 0, len(nodes)-1)
+			m.revealPaletteNode()
 			return m, nil
 		}
 		m.moveSelectedEditorNode(0, 1)
@@ -325,9 +385,16 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 			m.openNodeModal()
 		}
 	}
+	// The nodes panel has the focus: these act on the canvas.
+	if m.editorMode == editorModeAdd {
+		return m, nil
+	}
 	switch msg.String() {
 	case "a":
 		m.editorMode = editorModeAdd
+	case "n":
+		x, y := m.newCommentSpot()
+		m.addComment(commentNote, x, y)
 	case "o":
 		m.openExecutionResult()
 	case "c":
@@ -359,9 +426,20 @@ func (m model) renderWorkflowEditor() string {
 	separator := lipgloss.NewStyle().Foreground(panelBorder).Render("│")
 	rule := lipgloss.NewStyle().Foreground(panelBorder).Render
 
+	var chat []string
+	if m.aiChatRect.h > 0 {
+		chat = m.renderAIChatBar()
+	}
+
 	rows := m.renderWorkflowTopBar()
 	for i := range m.paletteRect.h {
-		rows = append(rows, padRightBlank(palette[i], m.paletteRect.w)+separator+canvas[i])
+		row := padRightBlank(palette[i], m.paletteRect.w) + separator
+		if i < m.canvasRect.h {
+			row += canvas[i]
+		} else {
+			row += chat[i-m.canvasRect.h]
+		}
+		rows = append(rows, row)
 	}
 	rows = append(rows,
 		rule(m.ruleWithJunction(m.paletteRect.w, "─", "┴")),
@@ -374,11 +452,131 @@ func (m model) renderWorkflowEditor() string {
 // paletteNodeKindAtRow expects it.
 func (m model) renderPalettePane() []string {
 	title := lipgloss.NewStyle().Foreground(mutedTextColor).Bold(true).Render("NODES")
-	lines := append([]string{"", "  " + title}, m.renderPaletteLines()...)
+	if m.focusedPanel() == panelNodes {
+		title = panelMarker() + lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("NODES")
+	}
+	list := m.renderPaletteLines()
+	start := m.paletteOffset()
+	end := min(start+m.paletteListRows(), len(list))
+
+	lines := append([]string{"", "  " + title}, list[start:end]...)
 	for len(lines) < m.paletteRect.h {
 		lines = append(lines, "")
 	}
+	if m.paletteOverflows() {
+		lines[m.paletteRect.h-1] = m.renderPaletteScrollHint()
+	}
 	return lines[:m.paletteRect.h]
+}
+
+// The panels of the editor, in the order tab walks them.
+const (
+	panelCanvas = iota
+	panelNodes
+	panelAgent
+	panelCount
+)
+
+func (m model) focusedPanel() int {
+	switch {
+	case m.aiPromptInput.Focused():
+		return panelAgent
+	case m.editorMode == editorModeAdd:
+		return panelNodes
+	default:
+		return panelCanvas
+	}
+}
+
+func panelMarker() string {
+	return lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("▸ ")
+}
+
+// cycleEditorPanel moves the focus. Leaving the agent keeps its conversation open.
+func (m model) cycleEditorPanel(delta int) (model, tea.Cmd) {
+	next := (m.focusedPanel() + delta + panelCount) % panelCount
+
+	m.aiPromptInput.Blur()
+	m.editorMode = editorModeNormal
+	switch next {
+	case panelNodes:
+		m.editorMode = editorModeAdd
+		m.revealPaletteNode()
+	case panelAgent:
+		return m.openAIChat()
+	}
+	return m, nil
+}
+
+// paletteOverflows says the nodes don't fit, which costs a row for the scroll hint.
+func (m model) paletteOverflows() bool {
+	return len(m.paletteNodeRows()) > max(m.paletteRect.h-paletteHeader, 1)
+}
+
+// paletteListRows is how many rows of the list are on screen.
+func (m model) paletteListRows() int {
+	rows := max(m.paletteRect.h-paletteHeader, 1)
+	if m.paletteOverflows() {
+		return max(rows-1, 1)
+	}
+	return rows
+}
+
+// paletteOffset is the first row on screen. A smaller terminal can leave the saved
+// scroll past the end, so everything reads it from here.
+func (m model) paletteOffset() int {
+	return clamp(m.paletteScroll, 0, max(len(m.paletteNodeRows())-m.paletteListRows(), 0))
+}
+
+func (m *model) scrollPalette(delta int) {
+	m.paletteScroll = m.paletteOffset() + delta
+	m.paletteScroll = m.paletteOffset()
+}
+
+// revealPaletteNode scrolls just enough to show the node picked with the arrows.
+func (m *model) revealPaletteNode() {
+	row, seen := 0, -1
+	for i, kind := range m.paletteNodeRows() {
+		if kind != "" {
+			seen++
+		}
+		if seen == m.paletteIndex {
+			row = i
+			break
+		}
+	}
+
+	offset := m.paletteOffset()
+	switch {
+	case row < offset:
+		m.scrollPalette(row - offset - paletteRevealMargin)
+	case row >= offset+m.paletteListRows():
+		m.scrollPalette(row - offset - m.paletteListRows() + 1)
+	}
+}
+
+func (m model) renderPaletteScrollHint() string {
+	above, below := 0, 0
+	end := m.paletteOffset() + m.paletteListRows()
+	for i, kind := range m.paletteNodeRows() {
+		switch {
+		case kind == "":
+		case i < m.paletteOffset():
+			above++
+		case i >= end:
+			below++
+		}
+	}
+
+	hints := []string{}
+	if above > 0 {
+		hints = append(hints, fmt.Sprintf("↑ %d", above))
+	}
+	if below > 0 {
+		hints = append(hints, fmt.Sprintf("↓ %d more", below))
+	}
+	hint := truncatePlain(strings.Join(hints, "   "), max(m.paletteRect.w-3, 1))
+	return "  " + lipgloss.NewStyle().Foreground(accentColor).Render(hint)
 }
 
 // renderCanvasPane keeps the canvas two columns and two rows in, the origin the
@@ -400,17 +598,22 @@ func (m model) renderCanvasCaption() string {
 		return lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render(truncatePlain(m.connectCaption(), width))
 	}
 
-	caption := plural(len(m.editorNodes), "node") + "  ·  " + plural(len(m.editorConnections), "connection")
+	caption := plural(m.flowNodeCount(), "node") + "  ·  " + plural(len(m.editorConnections), "connection")
 	switch count := len(m.selectedIndices()); {
 	case m.hasSelectedConnection():
 		caption = m.selectedConnectionCaption()
 	case count > 1:
 		caption = fmt.Sprintf("%d nodes selected. Drag to move them together, del removes them.", count)
+	case count == 1 && m.editorNodes[m.selectedNode].isComment():
+		caption = "⏎ edits it: its text, type and color. Drag to move it."
 	case count == 1:
 		caption = "Drag ○ to a node to connect it, or click a node type to add it after this one."
 	}
 	caption += fmt.Sprintf("  ·  %d%%", scaled(100, m.zoom()))
-	return lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(caption, width))
+	if m.focusedPanel() != panelCanvas {
+		return lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(caption, width))
+	}
+	return panelMarker() + lipgloss.NewStyle().Foreground(mutedTextColor).Render(truncatePlain(caption, width-lipgloss.Width(panelMarker())))
 }
 
 func plural(count int, noun string) string {
@@ -437,7 +640,7 @@ func (m model) renderWorkflowTopBar() []string {
 		run = muted.Bold(true).Render(runningLabel)
 	}
 	right := run + "   " + save + "  "
-	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-6, 8)); status != "" {
+	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-8, 8)); status != "" {
 		right = status + "    " + right
 	}
 
@@ -471,7 +674,27 @@ func (m model) workflowFooterText() string {
 	if m.editorMode == editorModeConnect {
 		return "tab next node  c next output  ⏎ connect  esc cancel"
 	}
-	return "c connect  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  ctrl+r run  esc back"
+	if m.agentRunRequest != nil {
+		return "y run  n don't run"
+	}
+	if m.aiPromptInput.Focused() {
+		return "⏎ send  tab next panel  esc close"
+	}
+	if m.editorMode == editorModeAdd {
+		return "↑↓ choose  ⏎ add  tab next panel  esc canvas"
+	}
+	return m.agentHint() + "  a add node  tab panels  ctrl+p commands  c connect  [/] select  n comment  del delete  ctrl+z undo  +/- zoom  f fit  ctrl+s save  ctrl+r run  esc back"
+}
+
+// agentHint is also how a reply reaches someone who closed the bar.
+func (m model) agentHint() string {
+	switch {
+	case m.agentBusy && !m.aiChatOpen:
+		return "/ agent working..."
+	case m.agentUnread:
+		return "/ agent replied"
+	}
+	return "/ agent"
 }
 
 func (m model) runBusy() bool {
@@ -503,10 +726,13 @@ func (m model) renderCanvasLines() []string {
 	grid := newCanvasGrid(w, h)
 	drawCanvasDots(grid)
 
+	m.drawComments(grid)
 	m.drawConnections(grid)
 	m.drawPendingWire(grid)
 	for i, node := range m.editorNodes {
-		m.drawNode(grid, i, m.projectNode(node))
+		if !node.isComment() {
+			m.drawNode(grid, i, m.projectNode(node))
+		}
 	}
 	m.drawMarquee(grid)
 	if m.editorOverlay == editorOverlayContext {
@@ -542,6 +768,9 @@ func (m model) getPaletteNodes() []apiNodeDef {
 }
 
 func (m model) nodeDefinition(kind string) (apiNodeDef, bool) {
+	if kind == commentNodeKind {
+		return commentDefinition, true
+	}
 	for _, def := range m.getPaletteNodes() {
 		if slugifyNodeToken(def.Type) == slugifyNodeToken(kind) {
 			return def, true
@@ -612,93 +841,35 @@ func (m model) paletteNodeKindAtRow(row int) (string, bool) {
 	return kind, kind != ""
 }
 
-func (m model) renderAIChatPanel() string {
-	w := m.aiChatRect.w
-	h := m.aiChatRect.h
-	if w <= 0 || h <= 0 {
-		return ""
+// renderAIChatBar has the look of the command bar of the workflow list: a rule, the
+// conversation and the input.
+func (m model) renderAIChatBar() []string {
+	ruleColor := panelBorder
+	ruleChar := "─"
+	promptColor := mutedTextColor
+	if m.aiPromptInput.Focused() {
+		ruleColor = accentColor
+		ruleChar = "━"
+		promptColor = accentColor
 	}
 
-	innerWidth := max(w-4, 1)
-	msgAreaHeight := max(h-5, 1)
+	title := "Agent"
+	if m.agentBusy {
+		title += " working..."
+	}
+	lead := strings.Repeat(ruleChar, 2) + " "
+	fill := strings.Repeat(ruleChar, max(m.aiChatRect.w-lipgloss.Width(lead+title)-1, 0))
+	rule := lipgloss.NewStyle().Foreground(ruleColor).Render
+	rows := []string{rule(lead) + lipgloss.NewStyle().Foreground(mutedTextColor).Render(title) + rule(" "+fill)}
 
-	border := lipgloss.NewStyle().Foreground(panelBorder).Render
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(textColor)
-	mutedStyle := lipgloss.NewStyle().Foreground(mutedTextColor)
-	agentStyle := lipgloss.NewStyle().Foreground(accentColor)
-	userStyle := lipgloss.NewStyle().Foreground(successColor)
-
-	var allDisplayLines []string
-	for _, msg := range m.aiChatMessages {
-		if len(msg) > 5 && msg[:5] == "You: " {
-			header := userStyle.Render("You") + mutedStyle.Render(": ")
-			contentWidth := max(innerWidth-5, 4) // "You: " = 5 chars
-			wrapped := wrapPlainPreserveStyle(msg[5:], contentWidth)
-			for i, line := range wrapped {
-				if i == 0 {
-					allDisplayLines = append(allDisplayLines, header+line)
-				} else {
-					allDisplayLines = append(allDisplayLines, "     "+line)
-				}
-			}
-		} else if len(msg) > 7 && msg[:7] == "Agent: " {
-			header := agentStyle.Render("Agent") + mutedStyle.Render(": ")
-			contentWidth := max(innerWidth-7, 4) // "Agent: " = 7 chars
-			wrapped := wrapPlainPreserveStyle(msg[7:], contentWidth)
-			for i, line := range wrapped {
-				if i == 0 {
-					allDisplayLines = append(allDisplayLines, header+line)
-				} else {
-					allDisplayLines = append(allDisplayLines, "       "+line)
-				}
-			}
-		} else {
-			wrapped := wrapPlainPreserveStyle(msg, innerWidth)
-			allDisplayLines = append(allDisplayLines, wrapped...)
-		}
+	lines := m.aiChatLines(max(m.aiChatRect.w-4, 1))
+	visible := m.aiChatVisibleLines()
+	offset := clampScroll(m.aiChatScroll, len(lines), visible)
+	for _, line := range lines[offset:min(offset+visible, len(lines))] {
+		rows = append(rows, "  "+line)
 	}
 
-	offset := clampScroll(m.aiChatScroll, len(allDisplayLines), msgAreaHeight)
-	msgLines := make([]string, msgAreaHeight)
-	for row := 0; row < msgAreaHeight; row++ {
-		index := offset + row
-		if index < len(allDisplayLines) {
-			msgLines[row] = allDisplayLines[index]
-		}
-	}
-
-	inputWidth := max(w-4, 1)
-	inputLine := renderInputBlock(m.aiPromptInput.View(), inputWidth, m.aiPromptInput.Focused())
-
-	var b strings.Builder
-	b.WriteString(border("╭" + strings.Repeat("─", max(w-2, 0)) + "╮"))
-	b.WriteByte('\n')
-	b.WriteString(border("│ ") + padRightBlank(titleStyle.Render("AI Chat"), innerWidth) + border(" │"))
-	for _, line := range msgLines {
-		b.WriteByte('\n')
-		b.WriteString(border("│ ") + padRightBlank(line, innerWidth) + border(" │"))
-	}
-	b.WriteByte('\n')
-	b.WriteString(border("├" + strings.Repeat("─", max(w-2, 0)) + "┤"))
-
-	leftPadding := (innerWidth - inputWidth) / 2
-	if leftPadding < 0 {
-		leftPadding = 0
-	}
-	padStr := strings.Repeat(" ", leftPadding)
-
-	for _, line := range strings.Split(inputLine, "\n") {
-		b.WriteByte('\n')
-		rightPadding := innerWidth - lipgloss.Width(padStr+line)
-		if rightPadding < 0 {
-			rightPadding = 0
-		}
-		rightPadStr := strings.Repeat(" ", rightPadding)
-		b.WriteString(border("│ ") + padStr + line + rightPadStr + border(" │"))
-	}
-	b.WriteByte('\n')
-	b.WriteString(border("╰" + strings.Repeat("─", max(w-2, 0)) + "╯"))
-	return b.String()
+	return append(rows, "  "+lipgloss.NewStyle().Foreground(promptColor).Render("› ")+m.aiPromptInput.View())
 }
 
 func (m model) renderInspectorLines() []string {
@@ -715,7 +886,7 @@ func (m model) renderInspectorLines() []string {
 	} else {
 		lines = append(lines, "No node selected.")
 	}
-	lines = append(lines, "", "Drag with mouse to move", "Enter edit  C connect", "A add node  Esc back")
+	lines = append(lines, "", "Drag with mouse to move", "Enter edit  C connect", "A add node  Esc back", "/ chat with the agent")
 	return lines
 }
 
@@ -732,14 +903,33 @@ func (m model) renderWorkflowCommandPalette() string {
 		"",
 	}
 	width := min(46, max(m.width-8, 28))
-	for i, item := range items {
-		lines = append(lines, renderListRow("›", accentColor, item.label, width-4, i == m.editorMenuSelected))
+	start, end := m.paletteWindow(len(items))
+	if end-start < len(items) {
+		lines[0] = lipgloss.NewStyle().Foreground(mutedTextColor).Render(fmt.Sprintf("%s (%d of %d)", subtitle, m.editorMenuSelected+1, len(items)))
+	}
+	for i := start; i < end; i++ {
+		lines = append(lines, renderListRow("›", accentColor, items[i].label, width-4, i == m.editorMenuSelected))
 	}
 	lines = append(lines, "", lipgloss.NewStyle().Foreground(mutedTextColor).Render("↑↓ select  enter run  esc close"))
 
-	height := min(max(len(lines)+3, 10), max(m.height-4, 8))
+	height := m.paletteHeight(len(items))
 	palette := renderSectionPanel(title, lines, width, height)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, palette)
+}
+
+func (m model) paletteHeight(items int) int {
+	return min(max(items+paletteChrome, 10), max(m.height-4, 8))
+}
+
+// paletteWindow says which items fit in the palette, keeping the selected one in
+// view. Rendering and mouse handling both read it.
+func (m model) paletteWindow(items int) (int, int) {
+	rows := max(m.paletteHeight(items)-paletteChrome, 1)
+	if items <= rows {
+		return 0, items
+	}
+	start := clamp(m.editorMenuSelected-rows/2, 0, items-rows)
+	return start, start + rows
 }
 
 func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
@@ -773,9 +963,17 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.editorMode == editorModeAdd && inside(x, y, m.canvasRect) {
+		m.editorMode = editorModeNormal
+	}
+
 	if inside(x, y, m.paletteRect) {
-		row := y - m.paletteRect.y - 2
-		if kind, ok := m.paletteNodeKindAtRow(row); ok {
+		row := y - m.paletteRect.y - paletteHeader
+		if row >= m.paletteListRows() {
+			m.scrollPalette(m.paletteListRows())
+			return m, nil
+		}
+		if kind, ok := m.paletteNodeKindAtRow(row + m.paletteOffset()); ok {
 			m.addEditorNode(kind)
 			m.editorMode = editorModeNormal
 		}
@@ -794,7 +992,7 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 		}
 	}
 
-	if i := m.nodeIndexAt(x, y); i >= 0 {
+	if i := m.nodeIndexAt(x, y); i >= 0 && !m.wireOverComment(i, x, y) {
 		if m.editorMode == editorModeConnect {
 			m.selectOnly(i)
 			m.finishEditorConnection()
@@ -839,47 +1037,43 @@ func (m *model) handleWorkflowEditorWheel(mouse tea.Mouse) {
 		m.handleCanvasWheel(mouse)
 		return
 	}
+	if inside(mouse.X, mouse.Y, m.paletteRect) {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			m.scrollPalette(-wheelRows)
+		case tea.MouseWheelDown:
+			m.scrollPalette(wheelRows)
+		}
+		return
+	}
 	if !inside(mouse.X, mouse.Y, m.aiChatRect) {
 		return
 	}
 
 	switch mouse.Button {
 	case tea.MouseWheelUp:
-		m.aiChatScroll--
+		m.scrollAIChat(-1)
 	case tea.MouseWheelDown:
-		m.aiChatScroll++
+		m.scrollAIChat(1)
 	}
-	m.aiChatScroll = clampScroll(m.aiChatScroll, len(m.aiChatMessages), max(m.aiChatMessagesRect.h, 1))
 }
 
-func (m model) updateAIBuilderInput(msg tea.KeyPressMsg) model {
+func (m model) updateAIBuilderInput(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.aiPromptInput.Blur()
-		return m
+		return m.closeAIChat(), nil
+	case "tab":
+		return m.cycleEditorPanel(1)
+	case "shift+tab":
+		return m.cycleEditorPanel(-1)
 	}
 	if msg.Code == tea.KeyEnter {
-		m.submitAIBuilderPrompt()
-		return m
+		return m.submitAIBuilderPrompt()
 	}
 
 	var cmd tea.Cmd
 	m.aiPromptInput, cmd = m.aiPromptInput.Update(msg)
-	_ = cmd
-	return m
-}
-
-func (m *model) submitAIBuilderPrompt() {
-	prompt := fallbackString(m.aiPromptInput.Value(), "")
-	if prompt == "" {
-		return
-	}
-	m.aiChatMessages = append(m.aiChatMessages,
-		"You: "+prompt,
-		"Agent: API not connected yet. I would draft nodes for this request.",
-	)
-	m.aiChatScroll = clampScroll(len(m.aiChatMessages), len(m.aiChatMessages), max(m.aiChatMessagesRect.h, 1))
-	m.aiPromptInput.SetValue("")
+	return m, cmd
 }
 
 func (m *model) openWorkflowContextMenu(x, y int) {
@@ -952,9 +1146,16 @@ func (m *model) handleEditorOverlayClick(x, y int) {
 
 	row := y - menuRect.y - 1
 	if m.editorOverlay == editorOverlayCommand || m.editorOverlay == editorOverlayCreate {
-		row = y - menuRect.y - 5
+		row = y - menuRect.y - 4
 	}
 	items := m.editorMenuItems()
+	if m.editorOverlay == editorOverlayCommand || m.editorOverlay == editorOverlayCreate {
+		start, end := m.paletteWindow(len(items))
+		if row < 0 || row >= end-start {
+			return
+		}
+		row += start
+	}
 	if row < 0 || row >= len(items) {
 		return
 	}
@@ -978,9 +1179,7 @@ func (m model) editorMenuItems() []editorMenuItem {
 		return m.contextMenuItems()
 	}
 
-	items := []editorMenuItem{
-		{label: "Create node", action: editorActionOpenCreate},
-	}
+	items := append([]editorMenuItem{{label: "Create node", action: editorActionOpenCreate}}, commentMenuItems()...)
 	if m.hasSelectedEditorNode() {
 		items = append(items,
 			editorMenuItem{label: "Edit selected node", action: editorActionEdit},
@@ -997,7 +1196,7 @@ func (m model) editorMenuRect() rect {
 	if m.editorOverlay == editorOverlayCommand || m.editorOverlay == editorOverlayCreate {
 		items := m.editorMenuItems()
 		width := min(46, max(m.width-8, 28))
-		height := min(max(len(items)+7, 10), max(m.height-4, 8))
+		height := m.paletteHeight(len(items))
 		return rect{x: max((m.width-width)/2, 0), y: max((m.height-height)/2, 0), w: width, h: height}
 	}
 
@@ -1066,6 +1265,13 @@ func (m *model) runEditorAction(item editorMenuItem) {
 	case editorActionDelete:
 		m.closeEditorOverlay()
 		m.deleteSelection()
+	case editorActionAddComment:
+		x, y := m.newCommentSpot()
+		if m.editorOverlay == editorOverlayContext {
+			x, y = m.toWorld(m.editorMenuX, m.editorMenuY)
+		}
+		m.closeEditorOverlay()
+		m.addComment(item.kind, x, y)
 	case editorActionEdit:
 		m.closeEditorOverlay()
 		m.openNodeModal()

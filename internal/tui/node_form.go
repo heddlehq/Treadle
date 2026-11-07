@@ -288,6 +288,9 @@ func (m *model) saveNodeModal() {
 				node.w, node.h = m.nodeSize(node.kind, node.label)
 			}
 		}
+		if node.isComment() {
+			node.applyCommentForm()
+		}
 		m.rebuildNodeRects()
 		m.markEditorDirty()
 	}

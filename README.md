@@ -53,6 +53,12 @@ cd Treadle
 go run ./cmd/treadle
 ```
 
+## 🤖 Agent
+
+The chat in the editor talks to the MCP server of your Heddle instance, and the server does the rest: it answers with the LLM configured there, and can read, create and edit your flows. Treadle asks you before running one. Press `/` in the editor to open it in a bar under the canvas, and `esc` to close it: a reply that arrives meanwhile shows in the footer. Anything you type in the workflow list that isn't a command goes to it too, about the selected workflow.
+
+There's nothing to set up here. The provider and its key belong to the server.
+
 ## 📦 Releasing
 
 The [`VERSION`](VERSION) file is the only place the version is written down, and it's built into the binary.

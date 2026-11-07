@@ -17,7 +17,8 @@ func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.composerInput.Focused() {
 			if msg.Code == tea.KeyEnter {
-				return m, m.submitCommand()
+				cmd := m.submitCommand()
+				return m, cmd
 			}
 			switch msg.String() {
 			case "esc":
@@ -169,9 +170,9 @@ func (m model) renderAppScreen() string {
 	}
 	rows = append(rows, m.renderCommandBar()...)
 
-	hints := "↑↓ select  ⏎ open  n new  r reload  / command  L log out  q quit"
+	hints := "↑↓ select  ⏎ open  n new  r reload  / agent  L log out  q quit"
 	if m.composerInput.Focused() {
-		hints = "⏎ run  esc cancel"
+		hints = "⏎ send  esc cancel"
 	}
 	rows = append(rows, renderHints(hints, m.footerRect.w))
 
@@ -440,10 +441,12 @@ func (m *model) submitCommand() tea.Cmd {
 		*m = next
 		return cmd
 	default:
-		m.commandOutput = []string{
-			"Unknown command: " + value,
-			"Try: help",
-		}
+		m.composerInput.SetValue("")
+		m.composerInput.Blur()
+		m.commandOutput = nil
+		next, cmd := m.askFromList(value)
+		*m = next
+		return cmd
 	}
 
 	m.appendActivity("Command submitted: " + value)
@@ -456,12 +459,13 @@ func (m model) handleWorkflowLoaded(msg workflowLoadedMsg) (tea.Model, tea.Cmd) 
 	if msg.err != nil {
 		m.workflowsError = msg.err.Error()
 		m.appendActivity("Failed to open workflow: " + truncatePlain(msg.err.Error(), 56))
+		m.agentQueuedPrompt = ""
 		return m, nil
 	}
 
 	m.beginWorkflowEditorFromAPI(msg.flow)
 	m.appendActivity("Opened workflow: " + fallbackString(msg.flow.Name, fmt.Sprintf("Flow %d", msg.flow.ID)))
-	return m, nil
+	return m.sendQueuedPrompt()
 }
 
 func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
@@ -471,6 +475,9 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.editorStatusMessage = "Save failed: " + truncatePlain(msg.err.Error(), 40)
 		m.appendActivity("Failed to save workflow: " + truncatePlain(msg.err.Error(), 56))
+		if m.agentWaitingForSave {
+			m.abortPendingAgent()
+		}
 		return m, nil
 	}
 
@@ -478,11 +485,19 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	m.editorWorkflowName = fallbackString(msg.flow.Name, m.editorWorkflowName)
 	m.clearEditorDirty("All changes saved")
 	m.appendActivity("Saved workflow: " + m.editorWorkflowName)
+
 	reload := loadWorkflowsCmd(m.activeHost, m.activeAPIKey)
+	var run tea.Cmd
 	if runAfterSave {
-		return m, tea.Batch(reload, m.startExecution())
+		run = m.startExecution()
 	}
-	return m, reload
+	if !m.agentWaitingForSave {
+		return m, tea.Batch(reload, run)
+	}
+
+	m.agentWaitingForSave = false
+	next, ask := m.askAgent()
+	return next, tea.Batch(reload, run, ask)
 }
 
 func (m model) selectedWorkflowItem() (workflow, bool) {

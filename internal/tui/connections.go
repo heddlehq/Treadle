@@ -323,9 +323,12 @@ func (m model) nodeIndexAt(x, y int) int {
 	if !inside(x, y, m.canvasContentRect()) {
 		return -1
 	}
-	for i := len(m.editorNodes) - 1; i >= 0; i-- {
-		if inside(x, y, m.nodeRects[m.editorNodes[i].id]) {
-			return i
+	for _, layer := range []int{layerNode, layerComment, layerSection} {
+		for i := len(m.editorNodes) - 1; i >= 0; i-- {
+			node := m.editorNodes[i]
+			if node.layer() == layer && inside(x, y, m.nodeRects[node.id]) {
+				return i
+			}
 		}
 	}
 	return -1
