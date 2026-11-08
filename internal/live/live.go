@@ -135,9 +135,16 @@ func (c *Client) Change(ctx context.Context, flowID int, client string, base, gr
 	return answer.Data, err
 }
 
-// Focus says which nodes this person has selected, and which one they edit.
-func (c *Client) Focus(ctx context.Context, flowID int, client string, selected []string, editing string) error {
-	body := map[string]any{"client": client, "selected": selected, "editing": nil}
+// Point is where something is on a flow, in the coordinates of node positions.
+type Point struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+// Focus says which nodes this person has selected, which one they edit, and where
+// their cursor is, which a terminal doesn't have: nil takes it away from the canvases.
+func (c *Client) Focus(ctx context.Context, flowID int, client string, selected []string, editing string, cursor *Point) error {
+	body := map[string]any{"client": client, "selected": selected, "editing": nil, "cursor": cursor}
 	if editing != "" {
 		body["editing"] = editing
 	}

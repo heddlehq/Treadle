@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/color"
 	"reflect"
 	"sort"
@@ -24,6 +25,9 @@ import (
 // way. Undo takes back only what this person did.
 //
 // A server without the live API is edited the way it was before: ctrl+s saves it.
+
+// webNodeSize is how big a node is drawn on the web, where the cursor goes on its middle.
+const webNodeSize = 88
 
 const (
 	liveSendAfter  = 150 * time.Millisecond
@@ -197,6 +201,7 @@ func (m model) handleLiveEvent(msg liveEventMsg) (tea.Model, tea.Cmd) {
 		if unsupported(msg.down) {
 			m.stopLive()
 			m.liveState = liveUnsupported
+			m.editorStatusMessage = "This Heddle can't edit live: changes are saved, and what others change shows when the flow opens again"
 			return m, nil
 		}
 		m.liveState = liveOffline
@@ -522,8 +527,9 @@ func (d liveDelta) backwards() liveDelta {
 	return liveDelta{base: d.graph, graph: d.base}
 }
 
-// liveFocus is what this person points at: what they selected, and what they edit.
-func (m model) liveFocus() (string, []string, string) {
+// liveFocus is what this person points at: what they selected, what they edit, and
+// the cursor the web draws for them, on the middle of the selected node.
+func (m model) liveFocus() (string, []string, string, *live.Point) {
 	selected := []string{}
 	for _, index := range m.selectedIndices() {
 		selected = append(selected, m.editorNodes[index].id)
@@ -534,14 +540,21 @@ func (m model) liveFocus() (string, []string, string) {
 			editing = node.id
 		}
 	}
-	return strings.Join(selected, ",") + "|" + editing, selected, editing
+	var cursor *live.Point
+	key := strings.Join(selected, ",") + "|" + editing
+	if node, ok := m.selectedEditorNode(); ok {
+		position := node.savedPosition()
+		cursor = &live.Point{X: position.X + webNodeSize/2, Y: position.Y + webNodeSize/2}
+		key += fmt.Sprintf("|%.0f,%.0f", cursor.X, cursor.Y)
+	}
+	return key, selected, editing, cursor
 }
 
 func (m *model) queueFocus() tea.Cmd {
 	if m.liveState != liveOnline || m.liveFocusQueued {
 		return nil
 	}
-	if key, _, _ := m.liveFocus(); key == m.liveFocusSent {
+	if key, _, _, _ := m.liveFocus(); key == m.liveFocusSent {
 		return nil
 	}
 	m.liveFocusQueued = true
@@ -554,7 +567,7 @@ func (m model) handleLiveFocus(msg liveFocusMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.liveFocusQueued = false
-	key, selected, editing := m.liveFocus()
+	key, selected, editing, cursor := m.liveFocus()
 	if key == m.liveFocusSent {
 		return m, nil
 	}
@@ -563,7 +576,7 @@ func (m model) handleLiveFocus(msg liveFocusMsg) (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer cancel()
-		_ = client.Focus(ctx, flowID, id, selected, editing)
+		_ = client.Focus(ctx, flowID, id, selected, editing, cursor)
 		return nil
 	}
 }

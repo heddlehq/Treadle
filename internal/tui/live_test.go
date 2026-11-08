@@ -334,6 +334,11 @@ func TestSelectingANodeTellsTheOthers(t *testing.T) {
 	if last["client"] != "me" || fmt.Sprint(last["selected"]) != "[log]" {
 		t.Fatalf("focus = %+v", last)
 	}
+	// The web draws the cursor of a terminal on the middle of the node it selected.
+	cursor, _ := last["cursor"].(map[string]any)
+	if cursor["x"] != 300.0+webNodeSize/2 || cursor["y"] != webNodeSize/2.0 {
+		t.Fatalf("cursor = %+v", last["cursor"])
+	}
 }
 
 func TestRunningSendsWhatChangedFirst(t *testing.T) {
