@@ -210,7 +210,7 @@ func (m model) handleLiveEvent(msg liveEventMsg) (tea.Model, tea.Cmd) {
 		m.liveCanEdit = ready.CanEdit
 		m.liveSeq = ready.Seq
 		m.liveFocusSent = ""
-		m.offerDraft(ready.Graph, ready.Seq)
+		m.offerDraft(ready.Graph, ready.Seq, false)
 		return m, tea.Batch(next, m.queueSend())
 
 	case msg.event.Change != nil:
@@ -223,7 +223,7 @@ func (m model) handleLiveEvent(msg liveEventMsg) (tea.Model, tea.Cmd) {
 			// This person's own change: its answer brings the draft.
 			return m, next
 		}
-		m.offerDraft(change.Graph, change.Seq)
+		m.offerDraft(change.Graph, change.Seq, true)
 		return m, next
 
 	case msg.event.Presence != nil:
@@ -253,8 +253,9 @@ func (m model) handleLiveEvent(msg liveEventMsg) (tea.Model, tea.Cmd) {
 
 // offerDraft takes the draft as the server has it, now if nothing here is on its way
 // and nothing is half done, or once that is over.
-func (m *model) offerDraft(graph live.Graph, seq int) {
+func (m *model) offerDraft(graph live.Graph, seq int, theirs bool) {
 	m.livePending, m.livePendingSeq = &graph, seq
+	m.livePendingTheirs = m.livePendingTheirs || theirs
 	m.adoptPending()
 }
 
@@ -262,9 +263,11 @@ func (m *model) adoptPending() {
 	if m.livePending == nil || m.liveBusy() || m.liveUnsent() {
 		return
 	}
-	graph := *m.livePending
-	m.livePending = nil
-	m.adoptDraft(graph)
+	graph, theirs := *m.livePending, m.livePendingTheirs
+	m.livePending, m.livePendingTheirs = nil, false
+	if m.adoptDraft(graph) && theirs {
+		m.editorStatusMessage = "Changed by someone else"
+	}
 }
 
 // liveBusy is something half done on the canvas, which a new draft would pull from
@@ -279,12 +282,13 @@ func (m model) liveUnsent() bool {
 	return !reflect.DeepEqual(m.workflowRequestPayload().Workflow, m.liveBase)
 }
 
-// adoptDraft puts the draft on the canvas, keeping what is selected and where the view is.
-func (m *model) adoptDraft(graph live.Graph) {
+// adoptDraft puts the draft on the canvas, keeping what is selected and where the view
+// is. It says whether that changed the canvas.
+func (m *model) adoptDraft(graph live.Graph) bool {
 	flow, err := decodeGraph(graph)
 	if err != nil {
 		m.editorStatusMessage = "Can't read the flow from the server: " + err.Error()
-		return
+		return false
 	}
 
 	selected := map[string]bool{}
@@ -315,10 +319,7 @@ func (m *model) adoptDraft(graph live.Graph) {
 		delete(m.extraSelection, primary)
 	}
 	m.rebuildNodeRects()
-
-	if !reflect.DeepEqual(before, m.liveBase) && m.editorStatusMessage == "" {
-		m.editorStatusMessage = "Changed by someone else"
-	}
+	return !reflect.DeepEqual(before, m.liveBase)
 }
 
 func decodeGraph(graph live.Graph) (apiFlow, error) {

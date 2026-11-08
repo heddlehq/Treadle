@@ -399,3 +399,18 @@ func TestAServerWithoutTheLiveAPISavesByItself(t *testing.T) {
 		t.Fatalf("saves = %d", saves)
 	}
 }
+
+func TestOnlyTheChangesOfOthersSaySo(t *testing.T) {
+	f, d := newFakeLive(t), newDriver(t)
+	m := liveEditor(t, f, d, apiGraph(apiNodeAt("start", "Start", "Start", 0, 0), apiNodeAt("log", "Logger", "Note it", 300, 0)))
+	if strings.Contains(m.editorStatusMessage, "someone else") {
+		t.Fatalf("opening says %q", m.editorStatusMessage)
+	}
+
+	f.send("change", map[string]any{"seq": 2, "epoch": "e", "client": "web",
+		"graph": apiGraph(apiNodeAt("start", "Start", "Start", 0, 0))})
+	m = d.until(m, "their change shows", func(m model) bool { return len(m.editorNodes) == 1 })
+	if m.editorStatusMessage != "Changed by someone else" {
+		t.Fatalf("status = %q", m.editorStatusMessage)
+	}
+}

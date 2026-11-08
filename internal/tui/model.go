@@ -277,6 +277,7 @@ type model struct {
 	liveBaseSnapshot     editorSnapshot
 	livePending          *live.Graph
 	livePendingSeq       int
+	livePendingTheirs    bool
 	liveSending          bool
 	liveSendQueued       bool
 	autosaveHeld         bool
