@@ -41,8 +41,8 @@ func (m model) updateApp(msg tea.Msg) (model, tea.Cmd) {
 			m.moveWorkflow(1)
 			return m, nil
 		case "n":
-			m.createWorkflow()
-			return m, nil
+			cmd := m.createWorkflow()
+			return m, cmd
 		case "r":
 			return m.reloadWorkflows()
 		case "L":
@@ -210,6 +210,8 @@ func statusColor(status string) color.Color {
 		return successColor
 	case "running":
 		return infoColor
+	case "waiting":
+		return warmColor
 	case "failed":
 		return errorColor
 	default:
@@ -388,14 +390,18 @@ func (m *model) moveWorkflow(delta int) {
 	m.ensureSelectedWorkflowVisible()
 }
 
-func (m *model) createWorkflow() {
+// createWorkflow opens a new flow, created on the server right away, the way the web
+// does, so it is edited live from the start.
+func (m *model) createWorkflow() tea.Cmd {
 	m.beginNewWorkflowEditor()
+	m.editorDirty = true
+	return m.saveCurrentWorkflow()
 }
 
 func (m *model) openSelectedWorkflow() (model, tea.Cmd) {
 	if m.selectedWorkflow == len(m.workflows) {
-		m.createWorkflow()
-		return *m, nil
+		cmd := m.createWorkflow()
+		return *m, cmd
 	}
 
 	wf, ok := m.selectedWorkflowItem()
@@ -433,8 +439,7 @@ func (m *model) submitCommand() tea.Cmd {
 		}
 	case "create workflow":
 		m.composerInput.SetValue("")
-		m.beginNewWorkflowEditor()
-		return nil
+		return m.createWorkflow()
 	case "open selected workflow":
 		m.composerInput.SetValue("")
 		next, cmd := m.openSelectedWorkflow()
@@ -465,7 +470,9 @@ func (m model) handleWorkflowLoaded(msg workflowLoadedMsg) (tea.Model, tea.Cmd) 
 
 	m.beginWorkflowEditorFromAPI(msg.flow)
 	m.appendActivity("Opened workflow: " + fallbackString(msg.flow.Name, fmt.Sprintf("Flow %d", msg.flow.ID)))
-	return m.sendQueuedPrompt()
+	follow := m.startLive()
+	next, cmd := m.sendQueuedPrompt()
+	return next, tea.Batch(follow, cmd)
 }
 
 func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
@@ -473,6 +480,8 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 	runAfterSave := m.editorRunAfterSave
 	m.editorRunAfterSave = false
 	if msg.err != nil {
+		// Saving again waits for the next change, instead of trying over and over.
+		m.autosaveHeld = true
 		m.editorStatusMessage = "Save failed: " + truncatePlain(msg.err.Error(), 40)
 		m.appendActivity("Failed to save workflow: " + truncatePlain(msg.err.Error(), 56))
 		if m.agentWaitingForSave {
@@ -481,12 +490,16 @@ func (m model) handleWorkflowSaved(msg workflowSavedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	created := m.editorWorkflowID == 0
 	m.editorWorkflowID = msg.flow.ID
 	m.editorWorkflowName = fallbackString(msg.flow.Name, m.editorWorkflowName)
 	m.clearEditorDirty("All changes saved")
 	m.appendActivity("Saved workflow: " + m.editorWorkflowName)
 
 	reload := loadWorkflowsCmd(m.activeHost, m.activeAPIKey)
+	if created && m.liveState != liveUnsupported && m.screen == screenWorkflowEditor {
+		reload = tea.Batch(reload, m.startLive())
+	}
 	var run tea.Cmd
 	if runAfterSave {
 		run = m.startExecution()

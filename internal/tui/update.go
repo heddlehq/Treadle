@@ -6,6 +6,19 @@ import (
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	updated, ok := next.(model)
+	if !ok {
+		return next, cmd
+	}
+	updated, live := updated.afterLiveUpdate()
+	if live == nil {
+		return updated, cmd
+	}
+	return updated, tea.Batch(cmd, live)
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -15,7 +28,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = true
 	case tea.BlurMsg:
 		m.terminalFocused = false
+	case liveEventMsg:
+		return m.handleLiveEvent(msg)
+	case liveSendMsg:
+		return m.handleLiveSend(msg)
+	case liveFocusMsg:
+		return m.handleLiveFocus(msg)
+	case liveAppliedMsg:
+		return m.handleLiveApplied(msg)
+	case versionsLoadedMsg:
+		return m.handleVersionsLoaded(msg)
+	case publishedMsg:
+		return m.handlePublished(msg)
+	case restoredMsg:
+		return m.handleRestored(msg)
+	case terminalOutputMsg:
+		return m.handleTerminalOutput(msg)
+	case terminalExitedMsg:
+		return m.handleTerminalExited(msg)
+	case tea.PasteMsg:
+		if m.terminalTakesKeys() {
+			m.terminal.emu.Paste(msg.Content)
+			return m, nil
+		}
 	case tea.KeyPressMsg:
+		if m.terminalTakesKeys() {
+			return m.updateTerminalKey(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			// In the editor it copies, like everywhere else. With nothing to copy it
@@ -55,10 +94,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleWorkflowLoaded(msg)
 	case workflowSavedMsg:
 		return m.handleWorkflowSaved(msg)
-	case agentReplyMsg:
-		return m.handleAgentReply(msg)
-	case agentRunStartedMsg:
-		return m.handleAgentRunStarted(msg)
+	case agentStreamMsg:
+		return m.handleAgentStream(msg)
+	case agentSentMsg:
+		return m.handleAgentSent(msg)
 	case agentFlowLoadedMsg:
 		return m.handleAgentFlowLoaded(msg)
 	case executionStartedMsg:
@@ -105,9 +144,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// terminalTakesKeys is the Terminal focused on the screen, where every key is its own.
+func (m model) terminalTakesKeys() bool {
+	return m.screen == screenWorkflowEditor && m.terminal != nil && m.terminalFocus &&
+		m.editorOverlay == editorOverlayNone && m.editorMode != editorModeModal
+}
+
 func (m model) textInputFocused() bool {
 	return m.hostInput.Focused() || m.apiKeyInput.Focused() || m.composerInput.Focused() ||
-		m.aiPromptInput.Focused() || m.editorMode == editorModeModal
+		m.aiPromptInput.Focused() || m.publishInput.Focused() || m.editorMode == editorModeModal
 }
 
 func (m model) editorCanCopy() bool {

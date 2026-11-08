@@ -9,22 +9,26 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"treadle/internal/agent"
 )
 
-// fakeHeddle answers MCP and the workflow API, and records what it was asked.
+// fakeHeddle answers the agent and workflow APIs, and records what it was asked. Tests
+// play the events of the stream themselves, with stream.
 type fakeHeddle struct {
-	mu      sync.Mutex
-	reply   string
-	failure string
-	status  int
-	flow    apiFlow
-	chats   []map[string]any
-	runs    []map[string]any
-	url     string
+	mu        sync.Mutex
+	failure   string
+	status    int
+	flow      apiFlow
+	messages  []string
+	decisions []string
+	stops     int
+	url       string
 }
 
 func (s *fakeHeddle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -35,88 +39,74 @@ func (s *fakeHeddle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(s.status)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/v1/workflows/") {
-		json.NewEncoder(w).Encode(workflowResponse{Data: s.flow})
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
-		json.NewEncoder(w).Encode(pageResponse[apiFlow]{})
-		return
-	}
 
-	var body struct {
-		ID     int    `json:"id"`
-		Method string `json:"method"`
-		Params struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-		} `json:"params"`
-	}
-	json.NewDecoder(r.Body).Decode(&body)
-
-	result := func(text string, isError bool) {
-		encoded, _ := json.Marshal(text)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"isError":%t,"content":[{"type":"text","text":%s}]}}`,
-			body.ID, isError, encoded)
-	}
-
-	switch body.Method {
-	case "initialize":
-		w.Header().Set("Mcp-Session-Id", "session")
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, body.ID)
-	case "notifications/initialized":
-		w.WriteHeader(http.StatusAccepted)
-	case "tools/call":
-		switch body.Params.Name {
-		case "chat":
-			s.chats = append(s.chats, body.Params.Arguments)
-			if s.failure != "" {
-				result(s.failure, true)
-				return
-			}
-			result(s.reply, false)
-		case "run_flow":
-			s.runs = append(s.runs, body.Params.Arguments)
-			result(`{"id":"clear-grid-channel"}`, false)
+	var body map[string]string
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/agent/events"):
+		w.WriteHeader(http.StatusNotFound)
+	case strings.HasSuffix(r.URL.Path, "/agent/messages"):
+		if s.failure != "" {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprintf(w, `{"error":{"message":%q}}`, s.failure)
+			return
 		}
+		json.NewDecoder(r.Body).Decode(&body)
+		s.messages = append(s.messages, body["content"])
+		w.WriteHeader(http.StatusAccepted)
+	case strings.HasSuffix(r.URL.Path, "/agent/decision"):
+		json.NewDecoder(r.Body).Decode(&body)
+		s.decisions = append(s.decisions, body["decision"])
+		w.WriteHeader(http.StatusNoContent)
+	case strings.HasSuffix(r.URL.Path, "/agent/stop"):
+		s.stops++
+		w.WriteHeader(http.StatusNoContent)
+	case strings.HasPrefix(r.URL.Path, "/api/v1/workflows/"):
+		json.NewEncoder(w).Encode(workflowResponse{Data: s.flow})
+	default:
+		json.NewEncoder(w).Encode(pageResponse[apiFlow]{})
 	}
 }
 
-func (s *fakeHeddle) chatCount() int {
+func (s *fakeHeddle) messageCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.chats)
+	return len(s.messages)
 }
 
-func (s *fakeHeddle) runCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.runs)
-}
-
-func reply(text string) string {
-	encoded, _ := json.Marshal(agentReply{Reply: text})
-	return string(encoded)
-}
-
-func runRequest(text string) string {
-	encoded, _ := json.Marshal(agentReply{
-		Reply:      text,
-		RunRequest: &agentRunRequest{FlowID: 7, Name: "Flow", Input: map[string]any{"a": "b"}},
-	})
-	return string(encoded)
-}
-
-func heddle(t *testing.T, answer string) *fakeHeddle {
+func heddle(t *testing.T) *fakeHeddle {
 	t.Helper()
 
-	fake := &fakeHeddle{reply: answer, flow: apiFlow{ID: 7, Name: "Flow"}}
+	fake := &fakeHeddle{flow: apiFlow{ID: 7, Name: "Flow"}}
 	server := httptest.NewServer(fake)
 	t.Cleanup(server.Close)
 	fake.url = server.URL
 	return fake
+}
+
+// stream plays events as if they came from the server.
+func stream(t *testing.T, m model, events ...agent.Event) model {
+	t.Helper()
+
+	for _, event := range events {
+		next, cmd := m.Update(agentStreamMsg{flowID: m.agentFollowing, update: agent.Update{Event: &event}})
+		m = settle(t, next.(model), cmd)
+	}
+	return m
+}
+
+func reply(text string) []agent.Event {
+	return []agent.Event{
+		{Type: "status", Status: agent.StatusRunning},
+		{Type: "text_delta", Text: text},
+		{Type: "status", Status: agent.StatusIdle},
+	}
+}
+
+func asking() []agent.Event {
+	return []agent.Event{
+		{Type: "status", Status: agent.StatusRunning},
+		{Type: "permission", Permission: &agent.Permission{FlowName: "Flow"}},
+	}
 }
 
 func chatModel(t *testing.T, fake *fakeHeddle) model {
@@ -139,7 +129,17 @@ func settle(t *testing.T, m model, cmd tea.Cmd) model {
 		return m
 	}
 
-	msg := cmd()
+	// The stream only ends with the connection, so nothing here can wait for it.
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(200 * time.Millisecond):
+		return m
+	}
+
 	if batch, ok := msg.(tea.BatchMsg); ok {
 		for _, item := range batch {
 			m = settle(t, m, item)
@@ -149,7 +149,7 @@ func settle(t *testing.T, m model, cmd tea.Cmd) model {
 
 	// Only what the chat started: the cursor blink never ends.
 	switch msg.(type) {
-	case agentReplyMsg, agentRunStartedMsg, agentFlowLoadedMsg, workflowLoadedMsg:
+	case agentSentMsg, agentFlowLoadedMsg, workflowLoadedMsg:
 		next, nextCmd := m.Update(msg)
 		return settle(t, next.(model), nextCmd)
 	}
@@ -170,7 +170,7 @@ func say(t *testing.T, m model, prompt string) model {
 }
 
 func chatText(m model) string {
-	return strings.Join(m.aiChatMessages, "\n")
+	return ansi.Strip(strings.Join(m.aiChatLines(200), "\n"))
 }
 
 func onScreen(m model, text string) bool {
@@ -178,29 +178,82 @@ func onScreen(m model, text string) bool {
 }
 
 func TestChatStartsEmpty(t *testing.T) {
-	if m := chatModel(t, heddle(t, "")); len(m.aiChatMessages) != 0 {
-		t.Fatalf("messages = %q", m.aiChatMessages)
+	if m := chatModel(t, heddle(t)); len(m.agentTranscript.Items) != 0 {
+		t.Fatalf("items = %+v", m.agentTranscript.Items)
 	}
 }
 
-func TestChatTalksToTheChatTool(t *testing.T) {
-	fake := heddle(t, reply("On it."))
+func TestChatSendsTheMessageToTheServer(t *testing.T) {
+	fake := heddle(t)
 
 	m := say(t, chatModel(t, fake), "add a logger")
 
+	if fake.messages[0] != "add a logger" {
+		t.Fatalf("messages = %+v", fake.messages)
+	}
+	if !m.agentBusy {
+		t.Fatal("it should wait for the server to say it finished")
+	}
+}
+
+func TestChatShowsTheReplyAsItComes(t *testing.T) {
+	m := say(t, chatModel(t, heddle(t)), "hi")
+
+	m = stream(t, m, agent.Event{Type: "user_message", Text: "hi"}, agent.Event{Type: "text_delta", Text: "On "})
+	m = stream(t, m, agent.Event{Type: "text_delta", Text: "it."}, agent.Event{Type: "status", Status: agent.StatusIdle})
+
+	if !strings.Contains(chatText(m), "You: hi") || !strings.Contains(chatText(m), "Agent: On it.") {
+		t.Fatalf("chat = %q", chatText(m))
+	}
 	if m.agentBusy {
 		t.Fatal("should be done")
 	}
-	if last := m.aiChatMessages[len(m.aiChatMessages)-1]; last != "Agent: On it." {
-		t.Fatalf("last = %q", last)
+}
+
+func TestChatShowsTheToolsOfTheAgent(t *testing.T) {
+	m := say(t, chatModel(t, heddle(t)), "ta dando erro")
+
+	m = stream(t, m, agent.Event{Type: "tool_started", ID: "1", Name: "get_flow"})
+	if !strings.Contains(chatText(m), "◌ Reading the flow") {
+		t.Fatalf("chat = %q", chatText(m))
 	}
-	if fake.chats[0]["flow_id"] != "7" {
-		t.Fatalf("chat = %+v", fake.chats[0])
+
+	m = stream(t, m, agent.Event{Type: "tool_finished", ID: "1", OK: true, Output: "{}"})
+	if !strings.Contains(chatText(m), "✓ Reading the flow") {
+		t.Fatalf("chat = %q", chatText(m))
+	}
+}
+
+func TestChatShowsHowATestEnded(t *testing.T) {
+	m := say(t, chatModel(t, heddle(t)), "test it")
+
+	m = stream(t, m,
+		agent.Event{Type: "tool_started", ID: "1", Name: "test_flow"},
+		agent.Event{Type: "tool_finished", ID: "1", OK: true, Output: `{"status":"failed","error":{"message":"key :x not found"}}`},
+	)
+
+	if !strings.Contains(chatText(m), "Testing the flow · key :x not found") {
+		t.Fatalf("chat = %q", chatText(m))
+	}
+}
+
+func TestChatPicksUpWorkInProgress(t *testing.T) {
+	m := chatModel(t, heddle(t))
+
+	snapshot := agent.Transcript{
+		Status: agent.StatusRunning,
+		Items:  []agent.Item{{ID: "item-1", Role: agent.RoleUser, Text: "from the browser"}},
+	}
+	next, _ := m.Update(agentStreamMsg{flowID: m.agentFollowing, update: agent.Update{Snapshot: &snapshot}})
+	m = next.(model)
+
+	if !m.agentBusy || !strings.Contains(chatText(m), "from the browser") {
+		t.Fatalf("busy = %v, chat = %q", m.agentBusy, chatText(m))
 	}
 }
 
 func TestChatIsBusyWhileTheServerThinks(t *testing.T) {
-	m, cmd := send(t, chatModel(t, heddle(t, reply("ok"))), "hi")
+	m, cmd := send(t, chatModel(t, heddle(t)), "hi")
 
 	if !m.agentBusy || cmd == nil {
 		t.Fatal("should be waiting")
@@ -210,56 +263,25 @@ func TestChatIsBusyWhileTheServerThinks(t *testing.T) {
 	}
 }
 
-func TestChatSendsTheWholeConversation(t *testing.T) {
-	fake := heddle(t, reply("Hello."))
-
-	m := say(t, chatModel(t, fake), "first")
-	say(t, m, "second")
-
-	messages := fake.chats[1]["messages"].([]any)
-	if len(messages) != 3 {
-		t.Fatalf("messages = %+v", messages)
-	}
-	last := messages[2].(map[string]any)
-	if last["role"] != "user" || last["content"] != "second" {
-		t.Fatalf("last = %+v", last)
-	}
-	if messages[1].(map[string]any)["role"] != "assistant" {
-		t.Fatalf("messages = %+v", messages)
-	}
-}
-
 func TestChatShowsWhatTheServerSaysIsWrong(t *testing.T) {
-	fake := heddle(t, "")
-	fake.failure = "No LLM provider is configured on this server."
+	fake := heddle(t)
+	fake.failure = "The agent is still working."
 
 	m := say(t, chatModel(t, fake), "hi")
 
-	if !strings.Contains(chatText(m), "No LLM provider") {
-		t.Fatalf("chat = %q", chatText(m))
-	}
 	if m.agentBusy {
-		t.Fatal("should be done")
+		t.Fatal("should stop waiting")
 	}
-}
-
-func TestChatForgetsAMessageThatGotNoAnswer(t *testing.T) {
-	fake := heddle(t, "")
-	fake.failure = "rate limited"
-
-	m := say(t, chatModel(t, fake), "hi")
-
-	if len(m.agentTurns) != 0 {
-		t.Fatalf("turns = %+v", m.agentTurns)
+	if !strings.Contains(chatText(m), "The agent is still working.") {
+		t.Fatalf("chat = %q", chatText(m))
 	}
 }
 
 func TestChatReturnsToConnectWhenTheTokenIsRefused(t *testing.T) {
-	fake := heddle(t, "")
-	m := chatModel(t, fake)
+	fake := heddle(t)
 	fake.status = http.StatusUnauthorized
 
-	m = say(t, m, "hi")
+	m := say(t, chatModel(t, fake), "hi")
 
 	if m.screen != screenConnect {
 		t.Fatalf("screen = %v", m.screen)
@@ -267,34 +289,44 @@ func TestChatReturnsToConnectWhenTheTokenIsRefused(t *testing.T) {
 }
 
 func TestChatIgnoresMessagesWhileBusy(t *testing.T) {
-	fake := heddle(t, reply("ok"))
-	m, _ := send(t, chatModel(t, fake), "first")
+	fake := heddle(t)
+	m := say(t, chatModel(t, fake), "first")
 
-	m, cmd := send(t, m, "second")
+	next, cmd := send(t, m, "second")
 
-	if cmd != nil {
-		t.Fatal("a second message went out")
+	if cmd != nil || fake.messageCount() != 1 {
+		t.Fatal("sent a second message")
 	}
-	if m.aiPromptInput.Value() != "second" {
-		t.Fatal("the message should wait in the input")
+	if next.aiPromptInput.Value() != "second" {
+		t.Fatal("lost what was typed")
 	}
 }
 
-func TestChatDropsARepliesFromAnotherFlow(t *testing.T) {
-	fake := heddle(t, reply("late"))
-	m, cmd := send(t, chatModel(t, fake), "hi")
+func TestChatDropsEventsFromAnotherFlow(t *testing.T) {
+	m := chatModel(t, heddle(t))
+	event := agent.Event{Type: "text_delta", Text: "late"}
 
-	m.beginWorkflowEditorFromAPI(apiFlow{ID: 8, Name: "Other"})
-	next, _ := m.Update(agentReplyMsg{run: m.agentRun - 1, reply: agentReply{Reply: "late"}})
-	_ = cmd
+	next, _ := m.Update(agentStreamMsg{flowID: 99, update: agent.Update{Event: &event}})
 
-	if got := next.(model).aiChatMessages; len(got) != 0 {
-		t.Fatalf("messages = %q", got)
+	if strings.Contains(chatText(next.(model)), "late") {
+		t.Fatal("showed a reply about another flow")
+	}
+}
+
+func TestStopAsksTheServer(t *testing.T) {
+	fake := heddle(t)
+	m := say(t, chatModel(t, fake), "go")
+
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl})
+	settle(t, next.(model), cmd)
+
+	if fake.stops != 1 {
+		t.Fatalf("stops = %d", fake.stops)
 	}
 }
 
 func TestChatSavesUnsavedChangesFirst(t *testing.T) {
-	fake := heddle(t, reply("ok"))
+	fake := heddle(t)
 	m := chatModel(t, fake)
 	m.markEditorDirty()
 
@@ -303,20 +335,20 @@ func TestChatSavesUnsavedChangesFirst(t *testing.T) {
 	if cmd == nil || !m.editorSaving {
 		t.Fatal("should be saving")
 	}
-	if fake.chatCount() != 0 {
+	if fake.messageCount() != 0 {
 		t.Fatal("the agent would read a stale flow")
 	}
 
 	next, ask := m.Update(workflowSavedMsg{flow: apiFlow{ID: 7, Name: "Flow"}})
 	settle(t, next.(model), ask)
 
-	if fake.chatCount() != 1 {
-		t.Fatalf("chats = %d", fake.chatCount())
+	if fake.messageCount() != 1 {
+		t.Fatalf("chats = %d", fake.messageCount())
 	}
 }
 
 func TestChatStopsIfTheSaveFails(t *testing.T) {
-	fake := heddle(t, reply("ok"))
+	fake := heddle(t)
 	m := chatModel(t, fake)
 	m.markEditorDirty()
 	m, _ = send(t, m, "hi")
@@ -324,87 +356,77 @@ func TestChatStopsIfTheSaveFails(t *testing.T) {
 	next, _ := m.Update(workflowSavedMsg{err: errors.New("boom")})
 	m = next.(model)
 
-	if fake.chatCount() != 0 || m.agentBusy {
+	if fake.messageCount() != 0 || m.agentBusy {
 		t.Fatal("nothing should go out")
 	}
 	if !strings.Contains(chatText(m), "couldn't be saved") {
 		t.Fatalf("chat = %q", chatText(m))
 	}
-	if len(m.agentTurns) != 0 {
-		t.Fatalf("turns = %+v", m.agentTurns)
+	if m.agentPrompt != "" {
+		t.Fatalf("prompt = %q", m.agentPrompt)
 	}
 }
 
-func TestRunWaitsForConfirmation(t *testing.T) {
-	fake := heddle(t, runRequest("Ready."))
+func TestTheAgentAsksBeforeRunning(t *testing.T) {
+	m := stream(t, chatModel(t, heddle(t)), asking()...)
 
-	m := say(t, chatModel(t, fake), "run it")
-
-	if m.agentRunRequest == nil {
-		t.Fatal("should be asking")
-	}
 	if !strings.Contains(chatText(m), `Run "Flow"?`) {
 		t.Fatalf("chat = %q", chatText(m))
 	}
-	if fake.runCount() != 0 {
-		t.Fatal("ran without confirmation")
+}
+
+func TestAnswersGoToTheServer(t *testing.T) {
+	for key, decision := range map[string]string{"y": "once", "a": "always", "n": "deny"} {
+		fake := heddle(t)
+		m := stream(t, chatModel(t, fake), asking()...)
+
+		next, cmd := m.Update(keyPress(key))
+		m = settle(t, next.(model), cmd)
+
+		if len(fake.decisions) != 1 || fake.decisions[0] != decision {
+			t.Fatalf("%s: decisions = %+v", key, fake.decisions)
+		}
+		if m.agentTranscript.Permission != nil {
+			t.Fatalf("%s: still asking", key)
+		}
 	}
 }
 
-func TestRunGoesThroughMCPOnYes(t *testing.T) {
-	fake := heddle(t, runRequest("Ready."))
-	m := say(t, chatModel(t, fake), "run it")
+func TestAnsweringDoesNotBreakTheScreen(t *testing.T) {
+	for _, key := range []string{"y", "a", "n"} {
+		m := stream(t, chatModel(t, heddle(t)), asking()...)
 
-	next, cmd := m.Update(keyPress("y"))
-	m = settle(t, next.(model), cmd)
+		next, cmd := m.Update(keyPress(key))
+		m = settle(t, next.(model), cmd)
 
-	if fake.runCount() != 1 {
-		t.Fatalf("runs = %d", fake.runCount())
-	}
-	run := fake.runs[0]
-	if run["flow_id"] != "7" || run["input"].(map[string]any)["a"] != "b" {
-		t.Fatalf("run = %+v", run)
-	}
-	if !strings.Contains(chatText(m), "clear-grid-channel") {
-		t.Fatalf("chat = %q", chatText(m))
-	}
-	if m.agentBusy || m.agentRunRequest != nil {
-		t.Fatal("should be over")
+		_ = m.View()
 	}
 }
 
-func TestRunStopsOnNo(t *testing.T) {
-	fake := heddle(t, runRequest("Ready."))
-	m := say(t, chatModel(t, fake), "run it")
+func TestAFrameSurvivesAConversationThatChangedSinceTheLayout(t *testing.T) {
+	m := stream(t, chatModel(t, heddle(t)), asking()...)
 
-	next, cmd := m.Update(keyPress("n"))
-	m = settle(t, next.(model), cmd)
+	m.agentTranscript.Permission = nil
 
-	if fake.runCount() != 0 || m.agentRunRequest != nil {
-		t.Fatal("should have stopped")
-	}
-	if last := m.agentTurns[len(m.agentTurns)-1]; last.Content != "Don't run it." {
-		t.Fatalf("the agent wouldn't know: %+v", last)
-	}
+	_ = m.View()
 }
 
 func TestChatInputCantAnswerWhileAsking(t *testing.T) {
-	fake := heddle(t, runRequest("Ready."))
-	m := say(t, chatModel(t, fake), "run it")
+	fake := heddle(t)
+	m := stream(t, chatModel(t, fake), asking()...)
+	m.agentBusy = false
 
 	_, cmd := send(t, m, "something else")
 
-	if cmd != nil || fake.chatCount() != 1 {
+	if cmd != nil || fake.messageCount() != 0 {
 		t.Fatal("a message slipped past the question")
 	}
 }
 
 func TestTheQuestionOpensTheChat(t *testing.T) {
-	fake := heddle(t, runRequest("Ready."))
-	m, cmd := send(t, chatModel(t, fake), "run it")
-	m = m.closeAIChat()
+	m := chatModel(t, heddle(t)).closeAIChat()
 
-	m = settle(t, m, cmd)
+	m = stream(t, m, asking()...)
 
 	if !onScreen(m, `Run "Flow"?`) {
 		t.Fatal("nobody would see the question")
@@ -418,10 +440,14 @@ func agentFlow() apiFlow {
 }
 
 func TestCanvasShowsWhatTheAgentSaved(t *testing.T) {
-	fake := heddle(t, reply("Renamed."))
+	fake := heddle(t)
 	fake.flow = agentFlow()
 
 	m := say(t, chatModel(t, fake), "rename it")
+	m = stream(t, m,
+		agent.Event{Type: "tool_started", ID: "1", Name: "update_flow"},
+		agent.Event{Type: "tool_finished", ID: "1", OK: true, Output: "{}"},
+	)
 
 	if len(m.editorNodes) != 1 || m.editorNodes[0].id != "a" || m.editorWorkflowName != "Renamed" {
 		t.Fatalf("nodes = %+v name = %q", m.editorNodes, m.editorWorkflowName)
@@ -435,7 +461,7 @@ func TestCanvasShowsWhatTheAgentSaved(t *testing.T) {
 }
 
 func TestCanvasKeepsEditsMadeWhileTheAgentWorked(t *testing.T) {
-	m := chatModel(t, heddle(t, ""))
+	m := chatModel(t, heddle(t))
 	before := len(m.editorNodes)
 	m.markEditorDirty()
 
@@ -451,7 +477,7 @@ func TestCanvasKeepsEditsMadeWhileTheAgentWorked(t *testing.T) {
 }
 
 func TestCanvasIgnoresAnotherFlow(t *testing.T) {
-	m := chatModel(t, heddle(t, ""))
+	m := chatModel(t, heddle(t))
 	before := len(m.editorNodes)
 
 	flow := agentFlow()
@@ -464,9 +490,8 @@ func TestCanvasIgnoresAnotherFlow(t *testing.T) {
 }
 
 func TestLongRepliesCanBeReadToTheEnd(t *testing.T) {
-	fake := heddle(t, reply(strings.Repeat("line\n", 200)+"the end"))
-
-	m := say(t, chatModel(t, fake), "hi")
+	m := say(t, chatModel(t, heddle(t)), "hi")
+	m = stream(t, m, reply(strings.Repeat("line\n", 200)+"the end")...)
 
 	if !strings.Contains(strings.Join(m.renderAIChatBar(), "\n"), "the end") {
 		t.Fatal("the end of the reply is out of reach")
@@ -475,7 +500,7 @@ func TestLongRepliesCanBeReadToTheEnd(t *testing.T) {
 
 func TestChatBreaksLinesBetweenWords(t *testing.T) {
 	m := sizedModel(140, 40)
-	m.aiChatMessages = []string{"Agent: The flow is saved and ready to run whenever you confirm it"}
+	m.agentTranscript.Items = []agent.Item{{Role: agent.RoleAssistant, Text: "The flow is saved and ready to run whenever you confirm it"}}
 
 	joined := ""
 	for _, line := range m.aiChatLines(24) {
@@ -492,7 +517,7 @@ func TestChatBreaksLinesBetweenWords(t *testing.T) {
 
 func TestChatCutsAWordOnlyWhenItCantFit(t *testing.T) {
 	m := sizedModel(140, 40)
-	m.aiChatMessages = []string{"Agent: " + strings.Repeat("x", 80)}
+	m.agentTranscript.Items = []agent.Item{{Role: agent.RoleAssistant, Text: strings.Repeat("x", 80)}}
 
 	for _, line := range m.aiChatLines(24) {
 		if width := lipgloss.Width(ansi.Strip(line)); width > 24 {
@@ -543,10 +568,11 @@ func TestSlashOpensAThinBarUnderTheCanvas(t *testing.T) {
 }
 
 func TestTheBarGrowsWithTheConversationUpToAThird(t *testing.T) {
-	m := chatModel(t, heddle(t, reply(strings.Repeat("a long reply ", 200))))
+	m := chatModel(t, heddle(t))
 	body := m.paletteRect.h
 
 	m = say(t, m, "hi")
+	m = stream(t, m, reply(strings.Repeat("a long reply ", 200))...)
 
 	if m.aiChatRect.h != aiChatChromeHeight+body/3 {
 		t.Fatalf("chat = %d of %d", m.aiChatRect.h, body)
@@ -560,7 +586,7 @@ func TestTheBarGrowsWithTheConversationUpToAThird(t *testing.T) {
 }
 
 func TestAClickOnTheBarDoesNotReachTheCanvas(t *testing.T) {
-	m := chatModel(t, heddle(t, ""))
+	m := chatModel(t, heddle(t))
 
 	if inside(m.aiPromptInputRect.x, m.aiPromptInputRect.y, m.canvasRect) {
 		t.Fatalf("input = %+v canvas = %+v", m.aiPromptInputRect, m.canvasRect)
@@ -577,7 +603,7 @@ func TestATinyTerminalKeepsTheCanvas(t *testing.T) {
 }
 
 func TestEscClosesTheBarBeforeLeavingTheEditor(t *testing.T) {
-	m := chatModel(t, heddle(t, ""))
+	m := chatModel(t, heddle(t))
 	m.aiPromptInput.Blur()
 
 	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -589,7 +615,7 @@ func TestEscClosesTheBarBeforeLeavingTheEditor(t *testing.T) {
 }
 
 func TestTheFooterSaysWhatTheAgentDidWhileTheBarWasClosed(t *testing.T) {
-	m, cmd := send(t, chatModel(t, heddle(t, reply("done"))), "hi")
+	m, cmd := send(t, chatModel(t, heddle(t)), "hi")
 	m = m.closeAIChat()
 
 	if !onScreen(m, "/ agent working") {
@@ -597,6 +623,7 @@ func TestTheFooterSaysWhatTheAgentDidWhileTheBarWasClosed(t *testing.T) {
 	}
 
 	m = settle(t, m, cmd)
+	m = stream(t, m, reply("done")...)
 	if !onScreen(m, "/ agent replied") {
 		t.Fatal("nothing says it replied")
 	}
@@ -609,7 +636,7 @@ func TestTheFooterSaysWhatTheAgentDidWhileTheBarWasClosed(t *testing.T) {
 }
 
 func TestTheFooterShowsTheKeysOfTheQuestion(t *testing.T) {
-	m := say(t, chatModel(t, heddle(t, runRequest("Ready."))), "run it")
+	m := stream(t, chatModel(t, heddle(t)), asking()...)
 
 	if !onScreen(m, "y run") {
 		t.Fatal("the keys aren't on screen")
@@ -617,7 +644,7 @@ func TestTheFooterShowsTheKeysOfTheQuestion(t *testing.T) {
 }
 
 func TestAnotherFlowStartsWithTheBarClosed(t *testing.T) {
-	m := say(t, chatModel(t, heddle(t, reply("hello"))), "hi")
+	m := stream(t, say(t, chatModel(t, heddle(t)), "hi"), reply("hello")...)
 
 	m.beginWorkflowEditorFromAPI(apiFlow{ID: 8, Name: "Other"})
 
@@ -647,33 +674,34 @@ func askFromList(t *testing.T, m model, prompt string) model {
 }
 
 func TestTheListSendsAMessageToTheSelectedWorkflow(t *testing.T) {
-	fake := heddle(t, reply("On it."))
+	fake := heddle(t)
 
 	m := askFromList(t, listModel(t, fake), "add a logger")
 
 	if m.screen != screenWorkflowEditor {
 		t.Fatalf("screen = %v", m.screen)
 	}
-	if fake.chatCount() != 1 || fake.chats[0]["flow_id"] != "7" {
-		t.Fatalf("chats = %+v", fake.chats)
+	if fake.messageCount() != 1 {
+		t.Fatalf("messages = %+v", fake.messages)
 	}
+	m = stream(t, m, reply("On it.")...)
 	if !onScreen(m, "On it.") {
 		t.Fatal("the reply isn't on screen")
 	}
 }
 
 func TestTheListStillRunsItsCommands(t *testing.T) {
-	fake := heddle(t, reply("no"))
+	fake := heddle(t)
 
 	m := askFromList(t, listModel(t, fake), "help")
 
-	if fake.chatCount() != 0 || m.screen != screenApp {
+	if fake.messageCount() != 0 || m.screen != screenApp {
 		t.Fatal("help went to the agent")
 	}
 }
 
 func TestAFailedOpenDropsTheMessage(t *testing.T) {
-	m := listModel(t, heddle(t, ""))
+	m := listModel(t, heddle(t))
 	m.agentQueuedPrompt = "hi"
 
 	next, _ := m.Update(workflowLoadedMsg{err: errors.New("boom")})
@@ -701,7 +729,7 @@ func TestChatFitsTheScreen(t *testing.T) {
 }
 
 func TestEscClosesTheChatAndKeepsTheConversation(t *testing.T) {
-	m := say(t, chatModel(t, heddle(t, reply("hello"))), "hi")
+	m := stream(t, say(t, chatModel(t, heddle(t)), "hi"), reply("hello")...)
 
 	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(model)
@@ -713,5 +741,26 @@ func TestEscClosesTheChatAndKeepsTheConversation(t *testing.T) {
 	next, _ = m.Update(keyPress("/"))
 	if !onScreen(next.(model), "hello") {
 		t.Fatal("the conversation was lost")
+	}
+}
+
+func TestPageKeysScrollTheConversation(t *testing.T) {
+	m := chatModel(t, heddle(t))
+	for i := range 40 {
+		m.agentTranscript.Items = append(m.agentTranscript.Items, agent.Item{ID: fmt.Sprint(i), Role: agent.RoleUser, Text: fmt.Sprintf("message %d", i)})
+	}
+	m.reflow()
+	m.scrollAIChatToEnd()
+	end := m.aiChatScroll
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = next.(model)
+	if m.aiChatScroll >= end {
+		t.Fatalf("scroll = %d, end = %d", m.aiChatScroll, end)
+	}
+
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := next.(model).aiChatScroll; got != end {
+		t.Fatalf("scroll = %d, want %d", got, end)
 	}
 }

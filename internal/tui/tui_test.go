@@ -317,6 +317,11 @@ func TestSavingANewWorkflowCreatesItOnTheServer(t *testing.T) {
 	var method, path string
 	var body workflowRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Once it exists, the flow is followed: that isn't the save.
+		if strings.HasSuffix(r.URL.Path, "/live") {
+			http.NotFound(w, r)
+			return
+		}
 		method, path = r.Method, r.URL.Path
 		json.NewDecoder(r.Body).Decode(&body)
 		json.NewEncoder(w).Encode(workflowResponse{Data: apiFlow{ID: 42, Name: "Created"}})
@@ -444,7 +449,7 @@ func TestEditorScreenFillsTheTerminal(t *testing.T) {
 		if len(lines) != size[1] {
 			t.Fatalf("%v: screen has %d lines", size, len(lines))
 		}
-		if !strings.Contains(lines[size[1]-1], "c connect") {
+		if !strings.Contains(lines[size[1]-1], "ctrl+p commands") {
 			t.Fatalf("%v: footer is not on the last line: %q", size, lines[size[1]-1])
 		}
 		for i, line := range lines {

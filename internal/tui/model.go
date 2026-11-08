@@ -9,7 +9,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"treadle/internal/mcp"
+	"treadle/internal/agent"
+	"treadle/internal/live"
 )
 
 const (
@@ -66,6 +67,8 @@ const (
 	editorOverlayCommand editorOverlay = "command"
 	editorOverlayCreate  editorOverlay = "create"
 	editorOverlayResult  editorOverlay = "result"
+	editorOverlayHelp    editorOverlay = "help"
+	editorOverlayGoTo    editorOverlay = "go_to"
 )
 
 type editorAction string
@@ -164,6 +167,7 @@ type model struct {
 	composerInput textinput.Model
 	modalInput    textinput.Model
 	aiPromptInput textinput.Model
+	publishInput  textinput.Model
 	spinner       spinner.Model
 
 	width  int
@@ -244,21 +248,58 @@ type model struct {
 	editorMenuX          int
 	editorMenuY          int
 	editorMenuSelected   int
+	paletteQuery         string
+	helpScroll           int
+	wireCursor           int
+	wireNode             int
 	editorMenuTarget     int
 	editorCreateAtMenu   bool
-	aiChatMessages       []string
+	agentTranscript      agent.Transcript
 	aiChatScroll         int
 	aiChatOpen           bool
 	agentUnread          bool
-	agentClient          *mcp.Client
-	agentRun             int
-	agentCancel          context.CancelFunc
+	agentFollowing       int
+	agentStopFollowing   context.CancelFunc
 	agentBusy            bool
+	agentSending         bool
 	agentWaitingForSave  bool
+	agentPrompt          string
 	agentQueuedPrompt    string
-	agentRunRequest      *agentRunRequest
-	agentTurns           []chatTurn
 	modalFocusedControl  int
+	terminal             *terminalSession
+	live                 *liveSession
+	liveGen              int
+	liveState            liveState
+	liveClientID         string
+	liveCanEdit          bool
+	liveSeq              int
+	liveBase             workflowPayload
+	liveBaseSnapshot     editorSnapshot
+	livePending          *live.Graph
+	livePendingSeq       int
+	livePendingTheirs    bool
+	liveSending          bool
+	liveSendQueued       bool
+	autosaveHeld         bool
+	publishVersion       int
+	publishVersionNumber int
+	publishAfterSend     bool
+	publishNote          string
+	versions             []live.Version
+	versionsLoading      bool
+	versionsError        string
+	versionSelected      int
+	versionConfirm       string
+	liveFocusQueued      bool
+	liveFocusSent        string
+	liveUndo             []liveDelta
+	liveRedo             []liveDelta
+	livePeople           []live.Person
+	liveCursors          map[string]liveCursor
+	terminalOpen         bool
+	terminalFocus        bool
+	terminalWide         bool
+	terminalScroll       int
 	modalDraft           []nodeControl
 	nodeRects            map[string]rect
 
@@ -273,6 +314,7 @@ type model struct {
 	aiPromptInputRect rect
 	paletteRect       rect
 	inspectorRect     rect
+	terminalRect      rect
 	footerRect        rect
 }
 
@@ -319,6 +361,14 @@ func initialModel() model {
 	aiPromptInput.SetVirtualCursor(true)
 	aiPromptInput.SetStyles(textInputStyles())
 
+	publishInput := textinput.New()
+	publishInput.SetWidth(48)
+	publishInput.CharLimit = 200
+	publishInput.Placeholder = "What changed, for whoever reads the versions"
+	publishInput.Prompt = ""
+	publishInput.SetVirtualCursor(true)
+	publishInput.SetStyles(textInputStyles())
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accentColor)
@@ -342,6 +392,7 @@ func initialModel() model {
 		composerInput:      composerInput,
 		modalInput:         modalInput,
 		aiPromptInput:      aiPromptInput,
+		publishInput:       publishInput,
 		spinner:            sp,
 		terminalFocused:    true,
 		selectedNode:       -1,

@@ -112,7 +112,7 @@ func TestThePaletteFollowsTheSelectionPastTheScreen(t *testing.T) {
 	}
 
 	for range 56 {
-		m = m.updateEditorOverlayKey(keyPress("down"))
+		m, _ = m.updateEditorOverlayKey(keyPress("down"))
 	}
 
 	screen := strings.Join(screenLines(m), "\n")
@@ -124,7 +124,7 @@ func TestThePaletteFollowsTheSelectionPastTheScreen(t *testing.T) {
 func TestClickingAScrolledPaletteAddsTheNodeDrawnThere(t *testing.T) {
 	m := manyNodesEditor(110, 24)
 	for range 30 {
-		m = m.updateEditorOverlayKey(keyPress("down"))
+		m, _ = m.updateEditorOverlayKey(keyPress("down"))
 	}
 
 	row := -1

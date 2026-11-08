@@ -166,6 +166,8 @@ func renderStatusValue(value string) string {
 		style = style.Foreground(successColor)
 	case "running":
 		style = style.Foreground(infoColor)
+	case "waiting":
+		style = style.Foreground(warmColor)
 	case "failed":
 		style = style.Foreground(errorColor)
 	}

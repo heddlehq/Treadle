@@ -15,8 +15,8 @@ func (m model) handleAppClick(x, y int) (model, tea.Cmd) {
 			m.selectedWorkflow = index
 			return m, nil
 		case index == len(m.workflows):
-			m.createWorkflow()
-			return m, nil
+			cmd := m.createWorkflow()
+			return m, cmd
 		}
 	}
 
