@@ -423,6 +423,7 @@ func (m model) handleLiveApplied(msg liveAppliedMsg) (tea.Model, tea.Cmd) {
 		if m.agentWaitingForSave {
 			m.abortPendingAgent()
 		}
+		m.publishAfterSend = false
 		m.adoptPending()
 		return m, nil
 	}
@@ -460,6 +461,10 @@ func (m model) handleLiveApplied(msg liveAppliedMsg) (tea.Model, tea.Cmd) {
 	if m.editorRunAfterSave && !m.liveUnsent() {
 		m.editorRunAfterSave = false
 		cmds = append(cmds, m.startExecution())
+	}
+	if m.publishAfterSend && !m.liveUnsent() {
+		m.publishAfterSend = false
+		cmds = append(cmds, m.publish(0, m.publishNote))
 	}
 	if m.agentWaitingForSave && !m.liveUnsent() {
 		m.agentWaitingForSave = false

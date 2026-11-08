@@ -167,6 +167,7 @@ type model struct {
 	composerInput textinput.Model
 	modalInput    textinput.Model
 	aiPromptInput textinput.Model
+	publishInput  textinput.Model
 	spinner       spinner.Model
 
 	width  int
@@ -279,6 +280,15 @@ type model struct {
 	liveSending          bool
 	liveSendQueued       bool
 	autosaveHeld         bool
+	publishVersion       int
+	publishVersionNumber int
+	publishAfterSend     bool
+	publishNote          string
+	versions             []live.Version
+	versionsLoading      bool
+	versionsError        string
+	versionSelected      int
+	versionConfirm       string
 	liveFocusQueued      bool
 	liveFocusSent        string
 	liveUndo             []liveDelta
@@ -350,6 +360,14 @@ func initialModel() model {
 	aiPromptInput.SetVirtualCursor(true)
 	aiPromptInput.SetStyles(textInputStyles())
 
+	publishInput := textinput.New()
+	publishInput.SetWidth(48)
+	publishInput.CharLimit = 200
+	publishInput.Placeholder = "What changed, for whoever reads the versions"
+	publishInput.Prompt = ""
+	publishInput.SetVirtualCursor(true)
+	publishInput.SetStyles(textInputStyles())
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(accentColor)
@@ -373,6 +391,7 @@ func initialModel() model {
 		composerInput:      composerInput,
 		modalInput:         modalInput,
 		aiPromptInput:      aiPromptInput,
+		publishInput:       publishInput,
 		spinner:            sp,
 		terminalFocused:    true,
 		selectedNode:       -1,

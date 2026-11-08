@@ -36,6 +36,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleLiveFocus(msg)
 	case liveAppliedMsg:
 		return m.handleLiveApplied(msg)
+	case versionsLoadedMsg:
+		return m.handleVersionsLoaded(msg)
+	case publishedMsg:
+		return m.handlePublished(msg)
+	case restoredMsg:
+		return m.handleRestored(msg)
 	case terminalOutputMsg:
 		return m.handleTerminalOutput(msg)
 	case terminalExitedMsg:
@@ -146,7 +152,7 @@ func (m model) terminalTakesKeys() bool {
 
 func (m model) textInputFocused() bool {
 	return m.hostInput.Focused() || m.apiKeyInput.Focused() || m.composerInput.Focused() ||
-		m.aiPromptInput.Focused() || m.editorMode == editorModeModal
+		m.aiPromptInput.Focused() || m.publishInput.Focused() || m.editorMode == editorModeModal
 }
 
 func (m model) editorCanCopy() bool {

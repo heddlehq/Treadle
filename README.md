@@ -59,6 +59,12 @@ The chat in the editor talks to the MCP server of your Heddle instance, and the 
 
 There's nothing to set up here. The provider and its key belong to the server.
 
+## 👥 Editing together
+
+A flow opened in Treadle is edited live with everyone who has it open, on the web or in another terminal. There is no save: each change goes to Heddle a moment after you make it, and what others change shows up on your canvas. The top bar shows who else is there, and the nodes they selected carry their name. Undo takes back only what you did.
+
+What production runs is the published version, not the draft. `p` publishes the draft with a note, and `v` lists the versions, with who changed what and which one is live: from there `r` puts an older version back in the draft and `p` publishes it again.
+
 ## ⌨️ Keys
 
 Everything in the editor works from the keyboard. Arrows (or `hjkl`) go to the nearest node in that direction, `shift` with them moves the selection, `⏎` edits a node, `a` adds one after it and `c` connects it. `g` goes to a node by name and `w` walks its wires.

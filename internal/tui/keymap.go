@@ -55,6 +55,7 @@ const (
 )
 
 func hasNode(m model) bool      { return m.hasSelectedEditorNode() }
+func hasFlow(m model) bool      { return m.editorWorkflowID != 0 }
 func hasSelection(m model) bool { return len(m.selectedIndices()) > 0 || m.hasSelectedConnection() }
 func hasConnections(m model) bool {
 	return m.hasSelectedEditorNode() && len(m.wiresOf(m.selectedNode)) > 0
@@ -83,6 +84,8 @@ func (m model) keyBindings() []keyBinding {
 
 		{keys: "ctrl+r", label: "Run the flow", group: groupFlow, action: editorActionRun, footer: 5},
 		{keys: "o", label: "Open the result of the last run", group: groupFlow, action: editorActionResult, when: func(m model) bool { return m.editorExecution != nil && m.editorExecution.settled() }},
+		{keys: "p", label: "Publish: production runs the draft as it is now", group: groupFlow, action: editorActionPublish, footer: 6, when: hasFlow},
+		{keys: "v", label: "Versions: who changed what, restore or publish one", group: groupFlow, action: editorActionVersions, when: hasFlow},
 		{keys: "ctrl+s", label: "Save now (it saves by itself while others can edit too)", group: groupFlow, action: editorActionSave},
 
 		{keys: "f", label: "Fit the flow on screen", group: groupView, action: editorActionFit},
@@ -90,8 +93,8 @@ func (m model) keyBindings() []keyBinding {
 		{keys: "-", label: "Zoom out", group: groupView, action: editorActionZoomOut},
 		{keys: "0", label: "Actual size", group: groupView, action: editorActionZoomReset},
 
-		{keys: "/", label: "Talk to the agent", group: groupPanels, action: editorActionAgent, footer: 6},
-		{keys: "t", label: "Terminal: Claude Code on this flow", group: groupPanels, action: editorActionTerminal, footer: 7},
+		{keys: "/", label: "Talk to the agent", group: groupPanels, action: editorActionAgent, footer: 7},
+		{keys: "t", label: "Terminal: Claude Code on this flow", group: groupPanels, action: editorActionTerminal, footer: 8},
 		{keys: "T", label: "Terminal across the whole editor, or beside the canvas", group: groupPanels, action: editorActionTerminalWide, when: func(m model) bool { return m.terminalOpen }},
 		{keys: terminalLeave, label: "Leave the Terminal, back to the canvas", group: groupPanels},
 		{keys: "", label: "Close the Terminal", group: groupPanels, action: editorActionTerminalClose, when: func(m model) bool { return m.terminalOpen }},
@@ -123,6 +126,8 @@ func (b keyBinding) footerHint() string {
 		return keys + " run"
 	case editorActionTerminal:
 		return keys + " terminal"
+	case editorActionPublish:
+		return keys + " publish"
 	}
 	return keys + " " + strings.ToLower(b.label)
 }

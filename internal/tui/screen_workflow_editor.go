@@ -259,6 +259,11 @@ func (m model) updateWorkflowEditor(msg tea.Msg) (model, tea.Cmd) {
 			m.aiPromptInput, cmd = m.aiPromptInput.Update(msg)
 			return m, cmd
 		}
+		if m.publishInput.Focused() {
+			var cmd tea.Cmd
+			m.publishInput, cmd = m.publishInput.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -273,6 +278,10 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch m.editorOverlay {
 	case editorOverlayHelp:
 		return m.updateHelpKey(msg)
+	case editorOverlayPublish:
+		return m.updatePublishKey(msg)
+	case editorOverlayVersions:
+		return m.updateVersionsKey(msg)
 	case editorOverlayCommand, editorOverlayCreate, editorOverlayGoTo:
 		return m.updatePaletteKey(msg)
 	case editorOverlayNone:
@@ -422,6 +431,14 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "t":
 		return m.openTerminal()
+	case "p":
+		if m.editorWorkflowID != 0 {
+			m.openPublish()
+		}
+	case "v":
+		if m.editorWorkflowID != 0 {
+			return m, m.openVersions()
+		}
 	case "T":
 		if m.terminalOpen {
 			m.terminalWide = !m.terminalWide
@@ -461,8 +478,13 @@ func (m model) renderWorkflowEditor() string {
 	if m.isPalette() {
 		return m.renderWorkflowCommandPalette()
 	}
-	if m.editorOverlay == editorOverlayHelp {
+	switch m.editorOverlay {
+	case editorOverlayHelp:
 		return m.renderHelp()
+	case editorOverlayPublish:
+		return m.renderPublish()
+	case editorOverlayVersions:
+		return m.renderVersions()
 	}
 
 	palette := m.renderPalettePane()
@@ -1061,8 +1083,9 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 		m.closeEditorOverlay()
 		return m, nil
 	}
-	if m.editorOverlay == editorOverlayHelp {
-		m.editorOverlay = editorOverlayNone
+	if m.editorOverlay == editorOverlayHelp || m.editorOverlay == editorOverlayVersions || m.editorOverlay == editorOverlayPublish {
+		m.closeEditorOverlay()
+		m.publishInput.Blur()
 		return m, nil
 	}
 	if m.terminalOpen && inside(x, y, m.terminalRect) {
@@ -1471,6 +1494,10 @@ func (m *model) runEditorAction(item editorMenuItem) tea.Cmd {
 		next, cmd := m.openAIChat()
 		*m = next
 		return cmd
+	case editorActionPublish:
+		m.openPublish()
+	case editorActionVersions:
+		return m.openVersions()
 	case editorActionTerminal:
 		next, cmd := m.openTerminal()
 		*m = next
