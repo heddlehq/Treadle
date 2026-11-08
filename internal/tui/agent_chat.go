@@ -300,6 +300,8 @@ func (m model) decideAgentRun(decision string) (model, tea.Cmd) {
 
 	flowID := m.editorWorkflowID
 	m.agentTranscript.Permission = nil
+	m.reflow()
+	m.scrollAIChatToEnd()
 
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), agentRequestTimeout)
@@ -455,10 +457,35 @@ func (m model) aiChatLines(width int) []string {
 	}
 
 	if permission := m.agentTranscript.Permission; permission != nil {
-		question := fmt.Sprintf("Run %q? It can have real side effects. [y] run  [a] always in this chat  [n] don't run", permission.FlowName)
-		lines = append(lines, labeledLines(agentLabel, question, len(agentMessagePrefix), width)...)
+		lines = append(lines, permissionCard(permission.FlowName, width)...)
 	}
 	return lines
+}
+
+// permissionCard stands out from the conversation: the agent is stopped until it is
+// answered, and what it asks for has real effects.
+func permissionCard(flowName string, width int) []string {
+	title := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
+
+	key := func(letter, label string) string {
+		return title.Render(letter) + " " + muted.Render(label)
+	}
+
+	card := strings.Join([]string{
+		title.Render(fmt.Sprintf("Run %q?", flowName)),
+		muted.Render("The agent wants to test it, which can have real side effects."),
+		"",
+		key("y", "run") + "    " + key("a", "always in this chat") + "    " + key("n", "don't run"),
+	}, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accentColor).
+		Padding(0, 1).
+		Width(max(width, 20))
+
+	return strings.Split(box.Render(card), "\n")
 }
 
 // toolLine is one call of the agent: what it is doing, and how that went.

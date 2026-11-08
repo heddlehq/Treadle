@@ -14,6 +14,7 @@ import (
 
 func init() {
 	executionPollInterval = time.Millisecond
+	executionWaitPollInterval = time.Millisecond
 }
 
 // heddleStub answers like the server: a run starts queued and each read moves it
@@ -369,6 +370,68 @@ func TestResultModalScrollsAndCloses(t *testing.T) {
 	}
 }
 
+func TestARunAtAWaitIsFollowedUntilItEnds(t *testing.T) {
+	stub := &heddleStub{steps: []apiExecution{
+		{Status: "running"},
+		{Status: "waiting", Waiting: &apiWaiting{NodeID: "start", ForCall: true}},
+		{Status: "waiting", Waiting: &apiWaiting{NodeID: "start", ForCall: true}},
+		{Status: "succeeded", Result: map[string]any{"ok": true}},
+	}}
+	m := runModel(t, stub)
+
+	m = playRun(t, m, m.runCurrentWorkflow())
+
+	if m.editorRunInFlight || !strings.HasPrefix(m.editorStatusMessage, "Execution finished") {
+		t.Fatalf("in flight %v, status %q", m.editorRunInFlight, m.editorStatusMessage)
+	}
+}
+
+func TestAWaitingRunSaysWhereItStoppedAndWhatResumesIt(t *testing.T) {
+	m := runModel(t, &heddleStub{})
+	m.editorRunInFlight = true
+	m.editorExecution = &apiExecution{ID: "x", Status: "running"}
+
+	updated, cmd := m.handleExecutionPolled(executionPolledMsg{
+		workflowID: 7,
+		execution: apiExecution{ID: "x", Status: "waiting", Waiting: &apiWaiting{
+			NodeID:  "start",
+			Until:   "2030-01-02T10:30:00Z",
+			ForCall: true,
+		}},
+	})
+	m = updated.(model)
+
+	if !m.editorRunInFlight || cmd == nil {
+		t.Fatal("stopped following a run that will go on")
+	}
+	if m.editorStatusMessage != "Execution waiting at Start, press o to inspect" {
+		t.Fatalf("status: %q", m.editorStatusMessage)
+	}
+
+	m, _ = m.updateWorkflowEditorKey(keyPress("o"))
+	view := m.renderWorkflowEditor()
+	for _, text := range []string{"WAITING", "Stopped at Start", "Until a call to its resume URL, or", "No output yet"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("no %q in:\n%s", text, view)
+		}
+	}
+}
+
+func TestWaitingForSaysWhatResumesARun(t *testing.T) {
+	now := time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+	cases := map[string]*apiWaiting{
+		"Until 10:30:00":                 {Until: "2026-11-08T10:30:00.123456Z"},
+		"Until Nov 9 10:30":              {Until: "2026-11-09T10:30:00Z"},
+		"Until a call to its resume URL": {ForCall: true},
+		"Until it is resumed":            nil,
+	}
+	for want, waiting := range cases {
+		if got := waitingFor(waiting, now); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
 func TestThereIsNoResultToOpenUntilARunEnds(t *testing.T) {
 	m := runModel(t, &heddleStub{})
 	m.editorExecution = &apiExecution{ID: "x", Status: "running"}
@@ -382,14 +445,17 @@ func TestThereIsNoResultToOpenUntilARunEnds(t *testing.T) {
 
 func TestEveryNodeIconHasATerminalMark(t *testing.T) {
 	icons := map[string]string{
-		"hero-bolt-solid":          "↗",
-		"hero-play-solid":          "▶",
-		"hero-share-solid":         "↔",
-		"hero-flag-solid":          "✓",
-		"hero-variable-solid":      "x",
-		"hero-code-bracket-solid":  "ƒ",
-		"hero-globe-alt-solid":     "◉",
-		"hero-document-text-solid": "≡",
+		"hero-bolt-solid":               "↗",
+		"hero-play-solid":               "▶",
+		"hero-share-solid":              "↔",
+		"hero-flag-solid":               "✓",
+		"hero-variable-solid":           "x",
+		"hero-code-bracket-solid":       "ƒ",
+		"hero-globe-alt-solid":          "◉",
+		"hero-document-text-solid":      "≡",
+		"hero-pause-circle-solid":       "‖",
+		"hero-arrows-pointing-in-solid": "⋈",
+		"hero-arrows-right-left-solid":  "↔",
 	}
 	for icon, mark := range icons {
 		if got := mapIconToTerminal(icon); got != mark {

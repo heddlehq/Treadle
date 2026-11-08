@@ -193,6 +193,10 @@ func mapIconToTerminal(iconName string) string {
 		return "✓"
 	case strings.Contains(iconName, "document"):
 		return "≡"
+	case strings.Contains(iconName, "pause"):
+		return "‖"
+	case strings.Contains(iconName, "pointing-in") || strings.Contains(iconName, "merge"):
+		return "⋈"
 	case strings.Contains(iconName, "play") || strings.Contains(iconName, "start"):
 		return "▶"
 	case strings.Contains(iconName, "link") || strings.Contains(iconName, "hook"):

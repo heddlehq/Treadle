@@ -16,6 +16,9 @@ import (
 const (
 	executionFinished = "succeeded"
 	executionFailed   = "failed"
+	// A run a Wait node paused. It goes on by itself, at a time or when its
+	// resume address is called, so Treadle keeps following it, less often.
+	executionWaiting = "waiting"
 
 	// How many reads in a row can fail before Treadle stops following a run.
 	executionPollRetries = 5
@@ -23,7 +26,10 @@ const (
 	runningLabel = "Running..."
 )
 
-var executionPollInterval = 500 * time.Millisecond
+var (
+	executionPollInterval     = 500 * time.Millisecond
+	executionWaitPollInterval = 5 * time.Second
+)
 
 type apiExecution struct {
 	ID     string           `json:"id"`
@@ -31,6 +37,14 @@ type apiExecution struct {
 	Result any              `json:"result"`
 	Error  map[string]any   `json:"error"`
 	Logs   []map[string]any `json:"logs"`
+	// Set while Status is "waiting": where the run stopped and what resumes it.
+	Waiting *apiWaiting `json:"waiting"`
+}
+
+type apiWaiting struct {
+	NodeID  any    `json:"node_id"`
+	Until   string `json:"until"`
+	ForCall bool   `json:"for_call"`
 }
 
 type executionResponse struct {
@@ -51,6 +65,11 @@ type executionPolledMsg struct {
 
 func (e apiExecution) done() bool {
 	return e.Status == executionFinished || e.Status == executionFailed
+}
+
+// settled is a run with something to inspect: one that ended, or one a Wait paused.
+func (e apiExecution) settled() bool {
+	return e.done() || e.Status == executionWaiting
 }
 
 // runCurrentWorkflow does what the web editor's Run Flow button does: it saves
@@ -121,11 +140,18 @@ func (m model) handleExecutionPolled(msg executionPolledMsg) (tea.Model, tea.Cmd
 }
 
 func (m *model) showExecution(execution apiExecution) {
+	previous := ""
+	if m.editorExecution != nil {
+		previous = m.editorExecution.Status
+	}
+
 	m.editorExecution = &execution
-	m.editorStatusMessage = executionNotice(execution.Status)
+	m.editorStatusMessage = m.executionNotice(execution)
 	if execution.done() {
 		m.editorRunInFlight = false
-		m.appendActivity(executionNotice(execution.Status) + ": " + m.editorWorkflowName)
+	}
+	if execution.settled() && execution.Status != previous {
+		m.appendActivity(m.executionNotice(execution) + ": " + m.editorWorkflowName)
 	}
 }
 
@@ -133,20 +159,71 @@ func (m model) followExecution() tea.Cmd {
 	if !m.editorRunInFlight || m.editorExecution == nil {
 		return nil
 	}
-	return pollExecutionCmd(m.activeHost, m.activeAPIKey, m.editorWorkflowID, m.editorExecution.ID)
+	interval := executionPollInterval
+	if m.editorExecution.Status == executionWaiting {
+		interval = executionWaitPollInterval
+	}
+	return pollExecutionCmd(m.activeHost, m.activeAPIKey, m.editorWorkflowID, m.editorExecution.ID, interval)
 }
 
-func executionNotice(status string) string {
-	switch status {
+func (m model) executionNotice(execution apiExecution) string {
+	switch execution.Status {
 	case "queued":
 		return "Execution queued"
 	case executionFinished:
 		return "Execution finished, press o to inspect"
 	case executionFailed:
 		return "Execution failed, press o to inspect"
+	case executionWaiting:
+		return "Execution waiting" + m.waitingAt(execution.Waiting) + ", press o to inspect"
 	default:
 		return "Execution running"
 	}
+}
+
+// waitingAt names the Wait node a run stopped at, as " at <label>".
+func (m model) waitingAt(waiting *apiWaiting) string {
+	if waiting == nil {
+		return ""
+	}
+	if label := m.nodeLabel(waiting.NodeID); label != "" {
+		return " at " + label
+	}
+	return ""
+}
+
+// waitingFor says what resumes a paused run: its time, a call to its address, or
+// whichever comes first.
+func waitingFor(waiting *apiWaiting, now time.Time) string {
+	if waiting == nil {
+		return "Until it is resumed"
+	}
+	until := formatWaitUntil(waiting.Until, now)
+	switch {
+	case until != "" && waiting.ForCall:
+		return "Until a call to its resume URL, or " + until
+	case until != "":
+		return "Until " + until
+	case waiting.ForCall:
+		return "Until a call to its resume URL"
+	default:
+		return "Until it is resumed"
+	}
+}
+
+func formatWaitUntil(value string, now time.Time) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	at, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	at = at.In(now.Location())
+	if y, mo, d := at.Date(); y == now.Year() && mo == now.Month() && d == now.Day() {
+		return at.Format("15:04:05")
+	}
+	return at.Format("Jan 2 15:04")
 }
 
 func startExecutionCmd(host, apiKey string, workflowID int) tea.Cmd {
@@ -165,8 +242,8 @@ func startExecutionCmd(host, apiKey string, workflowID int) tea.Cmd {
 	}
 }
 
-func pollExecutionCmd(host, apiKey string, workflowID int, id string) tea.Cmd {
-	return tea.Tick(executionPollInterval, func(time.Time) tea.Msg {
+func pollExecutionCmd(host, apiKey string, workflowID int, id string, interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 		defer cancel()
 
@@ -205,7 +282,7 @@ func requestExecution(ctx context.Context, method, target, apiKey string, body [
 }
 
 func (m *model) openExecutionResult() {
-	if m.editorExecution == nil || !m.editorExecution.done() {
+	if m.editorExecution == nil || !m.editorExecution.settled() {
 		return
 	}
 	m.editorOverlay = editorOverlayResult
@@ -284,11 +361,12 @@ func (m model) executionResultLines() []string {
 	var lines []string
 	if m.editorResultFull {
 		lines = strings.Split(prettyJSON(map[string]any{
-			"id":     execution.ID,
-			"status": execution.Status,
-			"result": execution.Result,
-			"error":  execution.Error,
-			"logs":   execution.Logs,
+			"id":      execution.ID,
+			"status":  execution.Status,
+			"result":  execution.Result,
+			"error":   execution.Error,
+			"logs":    execution.Logs,
+			"waiting": execution.Waiting,
 		}), "\n")
 	} else {
 		lines = m.executionOutputLines(*execution)
@@ -305,8 +383,11 @@ func (m model) executionResultLines() []string {
 func (m model) executionOutputLines(execution apiExecution) []string {
 	muted := lipgloss.NewStyle().Foreground(mutedTextColor)
 	statusColor := successColor
-	if execution.Status == executionFailed {
+	switch execution.Status {
+	case executionFailed:
 		statusColor = errorColor
+	case executionWaiting:
+		statusColor = warmColor
 	}
 
 	lines := []string{
@@ -324,8 +405,19 @@ func (m model) executionOutputLines(execution apiExecution) []string {
 		lines = append(lines, "")
 	}
 
+	if execution.Status == executionWaiting {
+		lines = append(lines, muted.Render("WAITING"))
+		if at := m.waitingAt(execution.Waiting); at != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(warmColor).Render("Stopped"+at))
+		}
+		lines = append(lines, waitingFor(execution.Waiting, time.Now()), "")
+	}
+
 	lines = append(lines, muted.Render("OUTPUT"))
 	if isEmptyOutput(execution.Result) {
+		if execution.Status == executionWaiting {
+			return append(lines, muted.Render("No output yet"))
+		}
 		return append(lines, muted.Render("No output produced"))
 	}
 	if text, ok := execution.Result.(string); ok {

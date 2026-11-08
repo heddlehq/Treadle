@@ -210,6 +210,8 @@ func statusColor(status string) color.Color {
 		return successColor
 	case "running":
 		return infoColor
+	case "waiting":
+		return warmColor
 	case "failed":
 		return errorColor
 	default:

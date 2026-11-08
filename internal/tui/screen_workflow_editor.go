@@ -441,10 +441,12 @@ func (m model) renderWorkflowEditor() string {
 	rows := m.renderWorkflowTopBar()
 	for i := range m.paletteRect.h {
 		row := padRightBlank(palette[i], m.paletteRect.w) + separator
+		// The conversation can change between a layout and a frame, and a short frame is
+		// better than a crash.
 		if i < m.canvasRect.h {
 			row += canvas[i]
-		} else {
-			row += chat[i-m.canvasRect.h]
+		} else if line := i - m.canvasRect.h; line < len(chat) {
+			row += chat[line]
 		}
 		rows = append(rows, row)
 	}

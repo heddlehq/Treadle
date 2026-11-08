@@ -392,6 +392,25 @@ func TestAnswersGoToTheServer(t *testing.T) {
 	}
 }
 
+func TestAnsweringDoesNotBreakTheScreen(t *testing.T) {
+	for _, key := range []string{"y", "a", "n"} {
+		m := stream(t, chatModel(t, heddle(t)), asking()...)
+
+		next, cmd := m.Update(keyPress(key))
+		m = settle(t, next.(model), cmd)
+
+		_ = m.View()
+	}
+}
+
+func TestAFrameSurvivesAConversationThatChangedSinceTheLayout(t *testing.T) {
+	m := stream(t, chatModel(t, heddle(t)), asking()...)
+
+	m.agentTranscript.Permission = nil
+
+	_ = m.View()
+}
+
 func TestChatInputCantAnswerWhileAsking(t *testing.T) {
 	fake := heddle(t)
 	m := stream(t, chatModel(t, fake), asking()...)
