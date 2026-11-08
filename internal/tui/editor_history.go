@@ -1,6 +1,10 @@
 package tui
 
-import "fmt"
+import (
+	"fmt"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 const (
 	maxUndoSteps = 50
@@ -45,6 +49,38 @@ func (m *model) restore(snapshot editorSnapshot) {
 	m.clearSelection()
 	m.rebuildNodeRects()
 	m.markEditorDirty()
+}
+
+// undoStep takes back the last change of this person: with others, only theirs.
+func (m *model) undoStep() tea.Cmd {
+	if m.liveActive() {
+		return m.liveUndoStep()
+	}
+	m.undo()
+	return nil
+}
+
+func (m *model) redoStep() tea.Cmd {
+	if m.liveActive() {
+		return m.liveRedoStep()
+	}
+	m.redo()
+	return nil
+}
+
+// canUndo and canRedo say whether undo and redo would do anything.
+func (m model) canUndo() bool {
+	if m.liveActive() {
+		return len(m.liveUndo) > 0 || m.liveUnsent()
+	}
+	return len(m.undoStack) > 0
+}
+
+func (m model) canRedo() bool {
+	if m.liveActive() {
+		return len(m.liveRedo) > 0 && !m.liveUnsent()
+	}
+	return len(m.redoStack) > 0
 }
 
 func (m *model) undo() {
@@ -239,8 +275,8 @@ func (m model) selectedConnectionCaption() string {
 // editor does with a double click and a drag.
 func (m model) contextMenuItems() []editorMenuItem {
 	items := []editorMenuItem{
-		{label: "Undo", shortcut: "ctrl+z", action: editorActionUndo, disabled: len(m.undoStack) == 0},
-		{label: "Redo", shortcut: "ctrl+y", action: editorActionRedo, disabled: len(m.redoStack) == 0},
+		{label: "Undo", shortcut: "ctrl+z", action: editorActionUndo, disabled: !m.canUndo()},
+		{label: "Redo", shortcut: "ctrl+y", action: editorActionRedo, disabled: !m.canRedo()},
 		{separator: true},
 	}
 

@@ -171,7 +171,12 @@ func (m model) submitAIBuilderPrompt() (model, tea.Cmd) {
 	m.agentPrompt = prompt
 	m.agentBusy = true
 
-	if m.editorDirty || m.editorWorkflowID == 0 {
+	if m.liveActive() && (m.liveSending || m.liveUnsent()) {
+		m.agentWaitingForSave = true
+		m.liveSendQueued = false
+		return m, m.sendNow()
+	}
+	if !m.liveActive() && (m.editorDirty || m.editorWorkflowID == 0) {
 		m.agentWaitingForSave = true
 		cmd := m.saveCurrentWorkflow()
 		if cmd == nil && !m.editorSaving {
@@ -280,7 +285,8 @@ func (m model) agentChangedTheFlow(toolID string) bool {
 }
 
 func (m model) reloadAfterAgent() (model, tea.Cmd) {
-	if m.editorWorkflowID == 0 {
+	// What the agent changed comes in like anyone else's change.
+	if m.editorWorkflowID == 0 || m.liveActive() {
 		return m, nil
 	}
 	if m.editorDirty {

@@ -27,6 +27,7 @@ func (m *model) beginNewWorkflowEditor() {
 }
 
 func (m *model) beginWorkflowEditor(name string) {
+	m.stopLive()
 	m.resetAgentChat()
 	m.screen = screenWorkflowEditor
 	m.editorWorkflowID = 0
@@ -95,6 +96,7 @@ func (m *model) beginWorkflowEditorFromAPI(flow apiFlow) {
 
 func (m *model) markEditorDirty() {
 	m.editorDirty = true
+	m.autosaveHeld = false
 	if !m.editorSaving {
 		m.editorStatusMessage = "Unsaved changes"
 	}
@@ -154,6 +156,11 @@ func (m model) mapAPIFlowToEditor(flow apiFlow) ([]editorNode, []editorConnectio
 }
 
 func (m *model) saveCurrentWorkflow() tea.Cmd {
+	if m.liveActive() {
+		// Everything is saved as it changes: this only sends it now.
+		m.liveSendQueued = false
+		return m.sendNow()
+	}
 	if m.editorSaving {
 		return nil
 	}
@@ -310,11 +317,9 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		m.screen = screenApp
 		return m, nil
 	case "ctrl+z":
-		m.undo()
-		return m, nil
+		return m, m.undoStep()
 	case "ctrl+y", "ctrl+shift+z":
-		m.redo()
-		return m, nil
+		return m, m.redoStep()
 	case "ctrl+c":
 		m.copySelection()
 		m.pasteCount = 0
@@ -683,6 +688,9 @@ func (m model) renderWorkflowTopBar() []string {
 
 	save := muted.Bold(true).Render("Save")
 	switch {
+	case m.liveActive() || m.liveState == liveUnsupported:
+		label, tone := m.liveStatus()
+		save = lipgloss.NewStyle().Foreground(tone).Render(label)
 	case m.editorSaving:
 		save = muted.Bold(true).Render("Saving...")
 	case m.editorDirty:
@@ -693,6 +701,9 @@ func (m model) renderWorkflowTopBar() []string {
 		run = muted.Bold(true).Render(runningLabel)
 	}
 	right := run + "   " + save + "  "
+	if people := m.renderPeople(max(m.width/4, 8)); people != "" {
+		right = people + "    " + right
+	}
 	if status := m.renderEditorStatus(max(m.width-lipgloss.Width(left)-lipgloss.Width(right)-8, 8)); status != "" {
 		right = status + "    " + right
 	}
@@ -785,7 +796,10 @@ func (m model) workflowRunButtonRect() rect {
 
 func (m model) workflowSaveButtonRect() rect {
 	label := "Save"
-	if m.editorSaving {
+	switch {
+	case m.liveActive() || m.liveState == liveUnsupported:
+		label, _ = m.liveStatus()
+	case m.editorSaving:
 		label = "Saving..."
 	}
 	rightWidth := lipgloss.Width(label) + 2
@@ -806,6 +820,7 @@ func (m model) renderCanvasLines() []string {
 			m.drawNode(grid, i, m.projectNode(node))
 		}
 	}
+	m.drawLiveCursors(grid)
 	m.drawMarquee(grid)
 	if m.editorOverlay == editorOverlayContext {
 		m.drawContextMenu(grid)
@@ -1365,10 +1380,10 @@ func (m *model) runEditorAction(item editorMenuItem) tea.Cmd {
 	switch item.action {
 	case editorActionUndo:
 		m.closeEditorOverlay()
-		m.undo()
+		return m.undoStep()
 	case editorActionRedo:
 		m.closeEditorOverlay()
-		m.redo()
+		return m.redoStep()
 	case editorActionCopy:
 		m.closeEditorOverlay()
 		m.copySelection()
@@ -1663,6 +1678,7 @@ func (m model) drawNode(grid [][]canvasCell, index int, node editorNode) {
 
 	border := lipgloss.NewStyle().Foreground(panelBorder)
 	fill := lipgloss.NewStyle().Foreground(textColor)
+	other, byOther := m.selectedBy(node.id)
 	switch {
 	case connecting && index == m.wireTarget():
 		border = border.Foreground(successColor)
@@ -1670,6 +1686,8 @@ func (m model) drawNode(grid [][]canvasCell, index int, node editorNode) {
 	case highlighted:
 		border = border.Foreground(focusedBorderColor)
 		fill = fill.Bold(true)
+	case byOther:
+		border = border.Foreground(personColor(other))
 	}
 
 	drawStyledRune(grid, node.x, node.y, '╭', &border)
@@ -1704,6 +1722,17 @@ func (m model) drawNode(grid [][]canvasCell, index int, node editorNode) {
 	}
 
 	m.drawOutputPorts(grid, index, node)
+
+	// Who else has it selected, on its top edge.
+	if byOther {
+		tag := []rune(" " + truncatePlain(other.Name, max(node.w-6, 1)) + " ")
+		style := lipgloss.NewStyle().Foreground(personColor(other))
+		for i, r := range tag {
+			if node.x+2+i < node.x+node.w-1 {
+				drawStyledRune(grid, node.x+2+i, node.y, r, &style)
+			}
+		}
+	}
 }
 
 // drawOutputPorts puts a handle on the right edge for each output: filled when

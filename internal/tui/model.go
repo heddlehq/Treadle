@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"treadle/internal/agent"
+	"treadle/internal/live"
 )
 
 const (
@@ -265,6 +266,25 @@ type model struct {
 	agentQueuedPrompt    string
 	modalFocusedControl  int
 	terminal             *terminalSession
+	live                 *liveSession
+	liveGen              int
+	liveState            liveState
+	liveClientID         string
+	liveCanEdit          bool
+	liveSeq              int
+	liveBase             workflowPayload
+	liveBaseSnapshot     editorSnapshot
+	livePending          *live.Graph
+	livePendingSeq       int
+	liveSending          bool
+	liveSendQueued       bool
+	autosaveHeld         bool
+	liveFocusQueued      bool
+	liveFocusSent        string
+	liveUndo             []liveDelta
+	liveRedo             []liveDelta
+	livePeople           []live.Person
+	liveCursors          map[string]liveCursor
 	terminalOpen         bool
 	terminalFocus        bool
 	terminalWide         bool

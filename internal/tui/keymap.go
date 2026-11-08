@@ -78,12 +78,12 @@ func (m model) keyBindings() []keyBinding {
 		{keys: "del", label: "Delete the selection", group: groupEdit, action: editorActionDelete, when: func(m model) bool { return m.canDeleteSelection() }},
 		{keys: "ctrl+c", label: "Copy", group: groupEdit, action: editorActionCopy, when: func(m model) bool { return m.canCopySelection() }},
 		{keys: "ctrl+v", label: "Paste", group: groupEdit, action: editorActionPaste, when: func(m model) bool { return len(m.clipboardNodes) > 0 }},
-		{keys: "ctrl+z", label: "Undo", group: groupEdit, action: editorActionUndo, when: func(m model) bool { return len(m.undoStack) > 0 }},
-		{keys: "ctrl+y", label: "Redo", group: groupEdit, action: editorActionRedo, when: func(m model) bool { return len(m.redoStack) > 0 }},
+		{keys: "ctrl+z", label: "Undo", group: groupEdit, action: editorActionUndo, when: func(m model) bool { return m.canUndo() }},
+		{keys: "ctrl+y", label: "Redo", group: groupEdit, action: editorActionRedo, when: func(m model) bool { return m.canRedo() }},
 
 		{keys: "ctrl+r", label: "Run the flow", group: groupFlow, action: editorActionRun, footer: 5},
 		{keys: "o", label: "Open the result of the last run", group: groupFlow, action: editorActionResult, when: func(m model) bool { return m.editorExecution != nil && m.editorExecution.settled() }},
-		{keys: "ctrl+s", label: "Save", group: groupFlow, action: editorActionSave},
+		{keys: "ctrl+s", label: "Save now (it saves by itself while others can edit too)", group: groupFlow, action: editorActionSave},
 
 		{keys: "f", label: "Fit the flow on screen", group: groupView, action: editorActionFit},
 		{keys: "+", label: "Zoom in", group: groupView, action: editorActionZoomIn},

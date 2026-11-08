@@ -84,6 +84,15 @@ func (m *model) runCurrentWorkflow() tea.Cmd {
 	}
 
 	m.editorExecution = nil
+	if m.liveActive() {
+		// A run reads the draft on the server, so what is still here goes first.
+		if m.liveSending || m.liveUnsent() {
+			m.editorRunAfterSave = true
+			m.liveSendQueued = false
+			return m.sendNow()
+		}
+		return m.startExecution()
+	}
 	if m.editorSaving || m.editorDirty || m.editorWorkflowID == 0 {
 		m.editorRunAfterSave = true
 		return m.saveCurrentWorkflow()

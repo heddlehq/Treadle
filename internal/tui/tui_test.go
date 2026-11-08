@@ -317,6 +317,11 @@ func TestSavingANewWorkflowCreatesItOnTheServer(t *testing.T) {
 	var method, path string
 	var body workflowRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Once it exists, the flow is followed: that isn't the save.
+		if strings.HasSuffix(r.URL.Path, "/live") {
+			http.NotFound(w, r)
+			return
+		}
 		method, path = r.Method, r.URL.Path
 		json.NewDecoder(r.Body).Decode(&body)
 		json.NewEncoder(w).Encode(workflowResponse{Data: apiFlow{ID: 42, Name: "Created"}})

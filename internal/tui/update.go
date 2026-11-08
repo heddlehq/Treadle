@@ -6,6 +6,19 @@ import (
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	updated, ok := next.(model)
+	if !ok {
+		return next, cmd
+	}
+	updated, live := updated.afterLiveUpdate()
+	if live == nil {
+		return updated, cmd
+	}
+	return updated, tea.Batch(cmd, live)
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -15,6 +28,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = true
 	case tea.BlurMsg:
 		m.terminalFocused = false
+	case liveEventMsg:
+		return m.handleLiveEvent(msg)
+	case liveSendMsg:
+		return m.handleLiveSend(msg)
+	case liveFocusMsg:
+		return m.handleLiveFocus(msg)
+	case liveAppliedMsg:
+		return m.handleLiveApplied(msg)
 	case terminalOutputMsg:
 		return m.handleTerminalOutput(msg)
 	case terminalExitedMsg:
