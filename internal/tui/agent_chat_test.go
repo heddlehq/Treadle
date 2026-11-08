@@ -743,3 +743,24 @@ func TestEscClosesTheChatAndKeepsTheConversation(t *testing.T) {
 		t.Fatal("the conversation was lost")
 	}
 }
+
+func TestPageKeysScrollTheConversation(t *testing.T) {
+	m := chatModel(t, heddle(t))
+	for i := range 40 {
+		m.agentTranscript.Items = append(m.agentTranscript.Items, agent.Item{ID: fmt.Sprint(i), Role: agent.RoleUser, Text: fmt.Sprintf("message %d", i)})
+	}
+	m.reflow()
+	m.scrollAIChatToEnd()
+	end := m.aiChatScroll
+
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = next.(model)
+	if m.aiChatScroll >= end {
+		t.Fatalf("scroll = %d, end = %d", m.aiChatScroll, end)
+	}
+
+	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := next.(model).aiChatScroll; got != end {
+		t.Fatalf("scroll = %d, want %d", got, end)
+	}
+}

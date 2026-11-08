@@ -66,6 +66,8 @@ const (
 	editorOverlayCommand editorOverlay = "command"
 	editorOverlayCreate  editorOverlay = "create"
 	editorOverlayResult  editorOverlay = "result"
+	editorOverlayHelp    editorOverlay = "help"
+	editorOverlayGoTo    editorOverlay = "go_to"
 )
 
 type editorAction string
@@ -244,6 +246,10 @@ type model struct {
 	editorMenuX          int
 	editorMenuY          int
 	editorMenuSelected   int
+	paletteQuery         string
+	helpScroll           int
+	wireCursor           int
+	wireNode             int
 	editorMenuTarget     int
 	editorCreateAtMenu   bool
 	agentTranscript      agent.Transcript

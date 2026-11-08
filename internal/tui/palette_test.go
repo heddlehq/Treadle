@@ -139,7 +139,7 @@ func TestTheFooterShowsHowToAddANodeAndOpenTheCommands(t *testing.T) {
 	m := editorModel(80, 24)
 
 	footer := strings.Join(screenLines(m), "\n")
-	for _, want := range []string{"a add node", "tab panels", "ctrl+p commands"} {
+	for _, want := range []string{"a add node", "? keys", "ctrl+p commands"} {
 		if !strings.Contains(footer, want) {
 			t.Fatalf("%q is not in the footer:\n%s", want, footer)
 		}

@@ -444,7 +444,7 @@ func TestEditorScreenFillsTheTerminal(t *testing.T) {
 		if len(lines) != size[1] {
 			t.Fatalf("%v: screen has %d lines", size, len(lines))
 		}
-		if !strings.Contains(lines[size[1]-1], "c connect") {
+		if !strings.Contains(lines[size[1]-1], "ctrl+p commands") {
 			t.Fatalf("%v: footer is not on the last line: %q", size, lines[size[1]-1])
 		}
 		for i, line := range lines {
