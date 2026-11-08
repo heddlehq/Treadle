@@ -48,6 +48,10 @@ const (
 	editorActionAgent      editorAction = "agent"
 	editorActionNodesPanel editorAction = "nodes_panel"
 	editorActionHelp       editorAction = "help"
+
+	editorActionTerminal      editorAction = "terminal"
+	editorActionTerminalWide  editorAction = "terminal_wide"
+	editorActionTerminalClose editorAction = "terminal_close"
 )
 
 func hasNode(m model) bool      { return m.hasSelectedEditorNode() }
@@ -87,6 +91,10 @@ func (m model) keyBindings() []keyBinding {
 		{keys: "0", label: "Actual size", group: groupView, action: editorActionZoomReset},
 
 		{keys: "/", label: "Talk to the agent", group: groupPanels, action: editorActionAgent, footer: 6},
+		{keys: "t", label: "Terminal: Claude Code on this flow", group: groupPanels, action: editorActionTerminal, footer: 7},
+		{keys: "T", label: "Terminal across the whole editor, or beside the canvas", group: groupPanels, action: editorActionTerminalWide, when: func(m model) bool { return m.terminalOpen }},
+		{keys: terminalLeave, label: "Leave the Terminal, back to the canvas", group: groupPanels},
+		{keys: "", label: "Close the Terminal", group: groupPanels, action: editorActionTerminalClose, when: func(m model) bool { return m.terminalOpen }},
 		{keys: "tab", label: "Next panel: canvas, nodes, agent", group: groupPanels},
 		{keys: "ctrl+p", label: "Commands", group: groupPanels},
 		{keys: "?", label: "Every key", group: groupPanels, action: editorActionHelp},
@@ -113,6 +121,8 @@ func (b keyBinding) footerHint() string {
 		return keys + " connect"
 	case editorActionRun:
 		return keys + " run"
+	case editorActionTerminal:
+		return keys + " terminal"
 	}
 	return keys + " " + strings.ToLower(b.label)
 }

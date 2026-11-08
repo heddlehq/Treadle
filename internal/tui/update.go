@@ -15,7 +15,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.terminalFocused = true
 	case tea.BlurMsg:
 		m.terminalFocused = false
+	case terminalOutputMsg:
+		return m.handleTerminalOutput(msg)
+	case terminalExitedMsg:
+		return m.handleTerminalExited(msg)
+	case tea.PasteMsg:
+		if m.terminalTakesKeys() {
+			m.terminal.emu.Paste(msg.Content)
+			return m, nil
+		}
 	case tea.KeyPressMsg:
+		if m.terminalTakesKeys() {
+			return m.updateTerminalKey(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			// In the editor it copies, like everywhere else. With nothing to copy it
@@ -103,6 +115,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// terminalTakesKeys is the Terminal focused on the screen, where every key is its own.
+func (m model) terminalTakesKeys() bool {
+	return m.screen == screenWorkflowEditor && m.terminal != nil && m.terminalFocus &&
+		m.editorOverlay == editorOverlayNone && m.editorMode != editorModeModal
 }
 
 func (m model) textInputFocused() bool {

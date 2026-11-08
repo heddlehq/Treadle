@@ -49,6 +49,7 @@ func (m *model) reflow() {
 	canvasWidth := max(m.width-editorSidebarWidth-sectionGapSize, 1)
 
 	canvasX := editorSidebarWidth + sectionGapSize
+	canvasWidth = m.layoutTerminal(canvasX, canvasWidth, editorBodyY, editorBodyHeight)
 	chatHeight := m.aiChatHeight(canvasWidth, editorBodyHeight)
 
 	m.paletteRect = rect{x: 0, y: editorBodyY, w: editorSidebarWidth, h: editorBodyHeight}

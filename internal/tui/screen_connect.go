@@ -56,7 +56,9 @@ func (m model) View() tea.View {
 
 	switch m.screen {
 	case screenWorkflowEditor:
-		return baseView(m.renderWorkflowEditor())
+		view := baseView(m.renderWorkflowEditor())
+		view.Cursor = m.terminalCursor()
+		return view
 	case screenApp:
 		return baseView(m.renderAppScreen())
 	default:

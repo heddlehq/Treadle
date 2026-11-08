@@ -415,6 +415,13 @@ func (m model) updateWorkflowEditorKey(msg tea.KeyPressMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
+	case "t":
+		return m.openTerminal()
+	case "T":
+		if m.terminalOpen {
+			m.terminalWide = !m.terminalWide
+			m.reflow()
+		}
 	case "a":
 		m.editorMode = editorModeAdd
 	case "g":
@@ -463,8 +470,17 @@ func (m model) renderWorkflowEditor() string {
 		chat = m.renderAIChatBar()
 	}
 
+	var terminal []string
+	if m.terminalOpen {
+		terminal = m.renderTerminalPane()
+	}
+
 	rows := m.renderWorkflowTopBar()
 	for i := range m.paletteRect.h {
+		if m.terminalCoversEditor() {
+			rows = append(rows, terminal[i])
+			continue
+		}
 		row := padRightBlank(palette[i], m.paletteRect.w) + separator
 		// The conversation can change between a layout and a frame, and a short frame is
 		// better than a crash.
@@ -472,6 +488,9 @@ func (m model) renderWorkflowEditor() string {
 			row += canvas[i]
 		} else if line := i - m.canvasRect.h; line < len(chat) {
 			row += chat[line]
+		}
+		if m.terminalOpen {
+			row = padRightBlank(row, m.terminalRect.x-sectionGapSize) + separator + terminal[i]
 		}
 		rows = append(rows, row)
 	}
@@ -705,6 +724,9 @@ func (m model) renderEditorStatus(width int) string {
 }
 
 func (m model) workflowFooterText() string {
+	if m.terminalTakesKeys() {
+		return terminalLeave + " back to the canvas  shift+pgup scroll back  every other key goes to Claude Code"
+	}
 	if m.editorMode == editorModeConnect {
 		return "←↑↓→ choose the node  c next output  ⏎ connect  esc cancel"
 	}
@@ -728,7 +750,12 @@ func (m model) workflowFooterText() string {
 
 // renderWorkflowFooter keeps the way to every other key on the right, always.
 func (m model) renderWorkflowFooter() string {
-	return renderFooter(strings.Split(m.workflowFooterText(), "  "), "? keys  ctrl+p commands", m.footerRect.w)
+	right := "? keys  ctrl+p commands"
+	// Those keys belong to the Terminal while it has the focus.
+	if m.terminalTakesKeys() {
+		right = ""
+	}
+	return renderFooter(strings.Split(m.workflowFooterText(), "  "), right, m.footerRect.w)
 }
 
 // agentHint is also how a reply reaches someone who closed the bar.
@@ -1023,6 +1050,11 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 		m.editorOverlay = editorOverlayNone
 		return m, nil
 	}
+	if m.terminalOpen && inside(x, y, m.terminalRect) {
+		m.terminalFocus = m.terminal != nil
+		return m, nil
+	}
+	m.terminalFocus = false
 	if m.editorOverlay != editorOverlayNone {
 		cmd := m.handleEditorOverlayClick(x, y)
 		return m, cmd
@@ -1110,6 +1142,15 @@ func (m model) handleWorkflowEditorClick(mouse tea.Mouse) (model, tea.Cmd) {
 }
 
 func (m *model) handleWorkflowEditorWheel(mouse tea.Mouse) {
+	if m.terminalOpen && m.editorOverlay == editorOverlayNone && inside(mouse.X, mouse.Y, m.terminalRect) {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			m.scrollTerminal(terminalWheelRows)
+		case tea.MouseWheelDown:
+			m.scrollTerminal(-terminalWheelRows)
+		}
+		return
+	}
 	if m.editorOverlay == editorOverlayResult {
 		if mouse.Button == tea.MouseWheelUp {
 			m.scrollExecutionResult(-1)
@@ -1415,6 +1456,17 @@ func (m *model) runEditorAction(item editorMenuItem) tea.Cmd {
 		next, cmd := m.openAIChat()
 		*m = next
 		return cmd
+	case editorActionTerminal:
+		next, cmd := m.openTerminal()
+		*m = next
+		return cmd
+	case editorActionTerminalWide:
+		m.closeEditorOverlay()
+		m.terminalWide = !m.terminalWide
+		m.reflow()
+	case editorActionTerminalClose:
+		m.closeEditorOverlay()
+		m.closeTerminal()
 	}
 	return nil
 }

@@ -59,6 +59,18 @@ The chat in the editor talks to the MCP server of your Heddle instance, and the 
 
 There's nothing to set up here. The provider and its key belong to the server.
 
+## ⌨️ Keys
+
+Everything in the editor works from the keyboard. Arrows (or `hjkl`) go to the nearest node in that direction, `shift` with them moves the selection, `⏎` edits a node, `a` adds one after it and `c` connects it. `g` goes to a node by name and `w` walks its wires.
+
+The footer shows the keys that matter where you are. `?` lists every key, and `ctrl+p` searches every command, the nodes of the flow and the node types to add.
+
+## 🖥️ Terminal
+
+`t` opens the Terminal beside the canvas: it runs [Claude Code](https://code.claude.com/docs/en/setup), installed on your machine, on the open flow through the MCP server of your Heddle, with the key Treadle is connected with. `ctrl+]` goes back to the canvas, `T` gives it the whole editor, and `shift+pgup` scrolls back.
+
+It is Claude Code as Anthropic ships it, and you sign in through its own flow. Treadle only carries your keys to it and draws its screen.
+
 ## 📦 Releasing
 
 The [`VERSION`](VERSION) file is the only place the version is written down, and it's built into the binary.

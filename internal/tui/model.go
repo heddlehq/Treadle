@@ -264,6 +264,11 @@ type model struct {
 	agentPrompt          string
 	agentQueuedPrompt    string
 	modalFocusedControl  int
+	terminal             *terminalSession
+	terminalOpen         bool
+	terminalFocus        bool
+	terminalWide         bool
+	terminalScroll       int
 	modalDraft           []nodeControl
 	nodeRects            map[string]rect
 
@@ -278,6 +283,7 @@ type model struct {
 	aiPromptInputRect rect
 	paletteRect       rect
 	inspectorRect     rect
+	terminalRect      rect
 	footerRect        rect
 }
 
