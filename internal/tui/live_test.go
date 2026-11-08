@@ -419,3 +419,24 @@ func TestOnlyTheChangesOfOthersSaySo(t *testing.T) {
 		t.Fatalf("status = %q", m.editorStatusMessage)
 	}
 }
+
+func TestThePointerOfTheWebShowsButNotTheCursorOfATerminalOnItsNode(t *testing.T) {
+	f, d := newFakeLive(t), newDriver(t)
+	m := liveEditor(t, f, d, apiGraph(apiNodeAt("start", "Start", "Start", 0, 0), apiNodeAt("log", "Logger", "Note it", 300, 0)))
+
+	f.send("presence", map[string]any{"people": []any{
+		map[string]any{"client": "web", "kind": "person", "user_id": 2, "name": "ana", "color": "#b5532a", "selected": []any{}},
+		map[string]any{"client": "term", "kind": "person", "user_id": 3, "name": "bia", "color": "#6f5bb0", "selected": []any{"log"}},
+	}})
+	f.send("cursor", map[string]any{"client": "web", "x": 150, "y": 400})
+	f.send("cursor", map[string]any{"client": "term", "x": 344, "y": 44})
+	m = d.until(m, "the cursors arrive", func(m model) bool { return len(m.liveCursors) == 2 })
+
+	screen := strings.Join(screenLines(m), "\n")
+	if !strings.Contains(screen, "▲ ana") {
+		t.Fatal("the pointer of the web isn't drawn")
+	}
+	if strings.Contains(screen, "▲ bia") {
+		t.Fatal("the cursor of the terminal is drawn over its node")
+	}
+}

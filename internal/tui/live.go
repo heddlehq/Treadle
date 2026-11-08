@@ -687,12 +687,17 @@ func (m model) drawLiveCursors(grid [][]canvasCell) {
 		}
 		wx := int(cursor.x / pixelsPerColumn)
 		wy := int(cursor.y / pixelsPerRow)
+		// A terminal puts its cursor on the node it selected, which already carries
+		// its name.
+		if m.onNodeSelectedBy(person, wx, wy) {
+			continue
+		}
 		x, y := m.toScreen(wx, wy)
 		style := lipgloss.NewStyle().Foreground(personColor(person)).Bold(true)
 		drawStyledRune(grid, x, y, '▲', &style)
 		label := lipgloss.NewStyle().Foreground(personColor(person))
-		for i, r := range []rune(person.Name) {
-			drawStyledRune(grid, x+2+i, y, r, &label)
+		for i, r := range []rune(" " + person.Name) {
+			drawStyledRune(grid, x+1+i, y, r, &label)
 		}
 	}
 }
@@ -704,4 +709,16 @@ func (m model) personByClient(client string) (live.Person, bool) {
 		}
 	}
 	return live.Person{}, false
+}
+
+func (m model) onNodeSelectedBy(person live.Person, x, y int) bool {
+	for _, id := range person.Selected {
+		if index, ok := m.editorNodeIndex(id); ok {
+			node := m.editorNodes[index]
+			if x >= node.x && x < node.x+node.w && y >= node.y && y < node.y+node.h {
+				return true
+			}
+		}
+	}
+	return false
 }
